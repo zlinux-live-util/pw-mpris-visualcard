@@ -26,6 +26,7 @@
 #include <spa/pod/builder.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -33,6 +34,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -55,21 +57,38 @@ int classScore(const std::string& mediaClass) {
   return 0;
 }
 
-/** Lowercase copy. Only used when the target changes, so allocation costs nothing. */
-std::string lower(std::string s) {
-  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return s;
+char lowerChar(char c) {
+  return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+}
+
+/** ASCII-case-insensitive find. Returns npos when absent. Both sides are compared through
+ *  lowerChar(), so neither needs a lowercased copy first. */
+size_t ciFind(std::string_view haystack, std::string_view needle, size_t from = 0) {
+  if (needle.empty() || needle.size() > haystack.size()) return std::string_view::npos;
+  for (size_t pos = from; pos + needle.size() <= haystack.size(); ++pos) {
+    size_t i = 0;
+    for (; i < needle.size(); ++i)
+      if (lowerChar(haystack[pos + i]) != lowerChar(needle[i])) break;
+    if (i == needle.size()) return pos;
+  }
+  return std::string_view::npos;
 }
 
 /** Whole-word, case-insensitive containment: "musicfox" is a word of both "alsa_playback.musicfox"
- *  and "PipeWire ALSA [musicfox]", but not of "musicfoxd". */
-bool hasWord(const std::string& haystack, const std::string& word) {
+ *  and "PipeWire ALSA [musicfox]", but not of "musicfoxd".
+ *
+ *  Case-insensitive without allocating. This runs five times per node per candidate word, and
+ *  findTarget() runs on every 250 ms tick, so the registry scan used to build two lowercased
+ *  std::strings per (node, field) pair -- a few hundred allocations a tick, four times a second,
+ *  growing with the size of the PipeWire registry, which the user does not control. */
+bool hasWord(std::string_view haystack, std::string_view word) {
   if (haystack.empty() || word.empty()) return false;
-  const std::string h = lower(haystack), w = lower(word);
-  for (size_t pos = h.find(w); pos != std::string::npos; pos = h.find(w, pos + w.size())) {
-    const bool leftOk = pos == 0 || !std::isalnum(static_cast<unsigned char>(h[pos - 1]));
-    const size_t end = pos + w.size();
-    const bool rightOk = end == h.size() || !std::isalnum(static_cast<unsigned char>(h[end]));
+  const size_t n = word.size();
+  for (size_t pos = 0; (pos = ciFind(haystack, word, pos)) != std::string_view::npos; pos += n) {
+    const bool leftOk = pos == 0 || !std::isalnum(static_cast<unsigned char>(haystack[pos - 1]));
+    const size_t end = pos + n;
+    const bool rightOk = end == haystack.size() ||
+                         !std::isalnum(static_cast<unsigned char>(haystack[end]));
     if (leftOk && rightOk) return true;
   }
   return false;
@@ -178,11 +197,14 @@ void AudioTap::Impl::onGlobalRemove(void* data, uint32_t id) {
 bool AudioTap::Impl::findTarget(const std::string& target, NodeInfo& out, uint32_t& id) const {
   // MPRIS hands back the bus name suffix, which may carry an instance suffix
   // ("firefox.instance12"); the full name is tried first, so it wins over any prefix match.
-  std::vector<std::string> words{target};
+  // Views into `target`, so the two candidate words cost no allocation either.
+  std::array<std::string_view, 2> words{target};
+  size_t nWords = 1;
   const size_t dot = target.rfind('.');
-  if (dot != std::string::npos && dot + 1 < target.size()) words.push_back(target.substr(0, dot));
+  if (dot != std::string::npos && dot + 1 < target.size()) words[nWords++] = target.substr(0, dot);
 
-  for (const std::string& word : words) {
+  for (size_t w = 0; w < nWords; ++w) {
+    const std::string_view word = words[w];
     const NodeInfo* best = nullptr;
     uint32_t bestId = 0;
     int bestScore = 0;

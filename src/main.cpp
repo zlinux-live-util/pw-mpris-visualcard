@@ -318,8 +318,6 @@ class App {
 
     if (!dumpPath.empty()) return dump(dumpPath);
 
-    if (tap_) tap_->start();
-
     artThread_ = std::thread([this] { artLoop(); });
 
     pwvideo::Options opt;
@@ -332,8 +330,25 @@ class App {
     opt.verbose = verbose_;
     // Capture only while a consumer is actually pulling frames, so a card nobody is watching
     // costs nothing on the audio side either.
+    //
+    // The tap is started here rather than in run(), on the first transition into STREAMING. It
+    // owns a pw_thread_loop, a second pw_core and a registry, and all three exist only to feed
+    // the ring -- so a card nobody is watching should not be paying for them. Starting lazily
+    // means a card left running with no consumer in OBS costs nothing on the audio side at all,
+    // not merely "captures nothing".
     opt.onStreaming = [this](bool streaming) {
-      if (tap_) tap_->setActive(streaming);
+      if (!tap_) return;
+      if (streaming) {
+        try {
+          tap_->start();
+        } catch (const std::exception& e) {
+          // Reported, not thrown: this runs on the video node's loop thread, where an escaping
+          // exception would unwind a PipeWire callback. The ring then just stays empty.
+          std::fprintf(stderr, "audio capture failed to start: %s\n", e.what());
+          return;
+        }
+      }
+      tap_->setActive(streaming);
     };
     pwvideo::VideoNode video(opt, [this](uint8_t* dst, int stride, int w, int h) {
       renderInto(dst, stride, w, h);
@@ -402,7 +417,10 @@ class App {
     if (!tap_) return;
 
     // --viz-source pins the target; otherwise follow whatever MPRIS says is playing.
-    const std::string want = cfg_.vizSource.empty() ? np.player : cfg_.vizSource;
+    // A reference, not a copy: this runs once per frame, and MPRIS bus names are long enough
+    // ("org.mpris.MediaPlayer2.firefox.instance1234") to defeat SSO, so naming the type by value
+    // heap-allocated on a path that otherwise allocates nothing.
+    const std::string& want = cfg_.vizSource.empty() ? np.player : cfg_.vizSource;
     if (want != vizTarget_) {
       vizTarget_ = want;
       tap_->setTarget(want);
