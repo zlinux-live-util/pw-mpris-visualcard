@@ -40,7 +40,7 @@ UNIT         := pw-mpris-visualcard.service
 UNIT_DIR     ?= $(HOME)/.config/systemd/user
 SERVICE_ARGS ?= --node pw-mpris-visualcard --size 460x690 --fps 30 --lyrics 3
 
-.PHONY: all clean dump run install-service uninstall-service
+.PHONY: all clean dump run install-service uninstall-service compile-commands
 
 all: $(TARGET)
 
@@ -81,5 +81,20 @@ uninstall-service:
 clean:
 	rm -f $(OBJ) $(DEP) $(TARGET)
 	rm -rf build
+
+# Emit compile_commands.json for editor tooling (clangd, LSP servers). The submodule headers under
+# lib/ are only reachable through the -I flags above, so without this database a language server
+# cannot resolve "text.hpp" / "assetcache.hpp" and reports a cascade of phantom errors.
+compile-commands:
+	@printf '[\n' > compile_commands.json
+	@first=1; \
+	for f in $(SRC) $(PWNODE_SRC); do \
+	  [ $$first -eq 1 ] || printf ',\n' >> compile_commands.json; \
+	  first=0; \
+	  printf '  {\n    "directory": "%s",\n    "file": "%s",\n    "command": "%s %s -c %s"\n  }' \
+	    "$(CURDIR)" "$$f" "$(CXX)" "$(CXXFLAGS)" "$$f" >> compile_commands.json; \
+	done; \
+	printf '\n]\n' >> compile_commands.json
+	@echo "Wrote compile_commands.json"
 
 -include $(DEP)

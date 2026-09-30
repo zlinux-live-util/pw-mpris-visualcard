@@ -1,0 +1,15 @@
+# clangd / LSP configuration.
+#
+# The video-node library is a git submodule whose headers live outside this project's src/, so
+# "text.hpp" and "assetcache.hpp" are only reachable through the -I flags the Makefile passes. An
+# editor language server without a compilation database therefore cannot resolve them, and reports
+# a cascade of phantom errors: every pwvideo:: symbol, plus <stdexcept> arriving transitively
+# through the headers it failed to read.
+#
+# These paths are relative to this file, so they hold for every checkout. `make compile-commands`
+# additionally writes compile_commands.json, which carries the full flag set including the
+# pkg-config include paths.
+CompileFlags:
+  Add:
+    - -Ilib/pw-video-simple-interface/src
+    - -Ilib/pw-video-simple-interface/extras
