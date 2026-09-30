@@ -248,7 +248,7 @@ make dump                                                    # one PNG from fake
 | RSS | 40–70 MB (scales with output size) |
 | Private (anonymous) memory | **6–25 MB** (grows with the cover cache and the cairo/pango glyph caches) |
 | CPU | **≈5.5% of one core** (`460x690` at 30fps, of which cover rotation accounts for 3.5 points) |
-| `--viz 1` adds | **≈0.9%** of one core (measured at 460x690: +0.27 ms/frame for ring drawing, +0.20 ms/frame FFT). With a cover present the ring shrinks it, which can make the frame *cheaper*; see [docs/internals.md](docs/internals.md) for both directions |
+| `--viz 1` adds | **≈0.9%** of one core (measured at 460x690: +0.27 ms/frame for ring drawing, +0.026 ms/frame FFT). With a cover present the ring shrinks it, which can make the frame *cheaper*; see [docs/internals.md](docs/internals.md) for both directions |
 | `--viz-fx` (default on) adds | **≈0.004%** of one core — the chain itself is nearly free (0.0013 ms/frame measured); ring drawing scales with how much of the band is filled |
 | With no consumer attached | zero frames pushed, **≈0.25%** CPU |
 | Child processes | **0** (persistent D-Bus connection) |

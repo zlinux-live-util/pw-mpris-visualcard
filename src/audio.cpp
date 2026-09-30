@@ -115,7 +115,11 @@ struct AudioTap::Impl {
   std::vector<float> ring;
   size_t ringMask = 0;
   std::atomic<uint64_t> written{0};
-  uint64_t readPos = 0;
+  // Written by the render thread in read() and reset to 0 by the loop thread in disconnect(),
+  // so it needs to be atomic rather than a plain counter. Relaxed is enough: the only ordering
+  // that matters is against `written`, which read() loads with acquire above, and a lost update
+  // across a reconnect would just replay a few samples.
+  std::atomic<uint64_t> readPos{0};
 
   /* ---- target selection: written by the render thread, read by the loop timer ---- */
   mutable std::mutex wantMu;
@@ -221,7 +225,7 @@ void AudioTap::Impl::disconnect() {
   channels.store(0, std::memory_order_relaxed);
   streaming.store(false, std::memory_order_relaxed);
   written.store(0, std::memory_order_relaxed);
-  readPos = 0;
+  readPos.store(0, std::memory_order_relaxed);
 }
 
 void AudioTap::Impl::reportMissing(const std::string& target) {
@@ -507,20 +511,26 @@ int AudioTap::rate() const { return impl_->rate.load(std::memory_order_relaxed);
 size_t AudioTap::read(float* out, size_t n) {
   Impl& s = *impl_;
   const uint64_t w = s.written.load(std::memory_order_acquire);
-  size_t avail = static_cast<size_t>(w - std::min<uint64_t>(s.readPos, w));
+  size_t avail = static_cast<size_t>(w - std::min<uint64_t>(s.readPos.load(std::memory_order_relaxed), w));
   avail = std::min(avail, s.ring.size());
   const size_t take = std::min(avail, n);
-  // KNOWN BUG: this rewinds to the start of the window just returned instead of stepping past
-  // its end, so readPos only ever moves when the caller asks for less than is available. Since
-  // App asks for vizBuf_.size() (16384) and ~1600 arrive per frame, take == avail every frame and
-  // readPos never advances: each call re-delivers the whole history, and Analyser::feed() then
-  // runs kMaxTransformsPerFeed transforms instead of one (~8x the FFT cost, ~0.20 vs 0.026
-  // ms/frame). The displayed spectrum is still correct -- the last window ends at the newest
-  // sample -- so this is wasted work, not a wrong picture. The fix is `readPos = w` (verified).
-  // Tracked as a separate change; see the PR description.
-  s.readPos = w - take;  // a caller that falls behind loses the oldest samples, never buffers up
+  // The window handed out is [w-take, w). readPos then steps to w, one past its end, so the next
+  // call reports only what has arrived since.
+  //
+  // This used to set readPos = w - take, i.e. back to the *start* of the window just returned.
+  // Whenever take == avail -- which is every frame in practice, since App asks for vizBuf_.size()
+  // (16384) and ~1600 samples arrive per frame -- that left readPos where it already was, so each
+  // call re-delivered the entire history. Analyser::feed() then ran kMaxTransformsPerFeed
+  // transforms instead of one: ~0.20 ms/frame of FFT rather than ~0.026, on every frame,
+  // forever. The displayed spectrum was never wrong (the last window still ended at the newest
+  // sample), so this was pure waste; see docs/internals.md for the corrected figures.
+  //
+  // A caller that falls behind still loses the oldest samples rather than accumulating latency:
+  // avail is clamped to the ring, and readPos jumps forward past the gap.
+  const uint64_t start = w - static_cast<uint64_t>(take);
   for (size_t i = 0; i < take; ++i)
-    out[i] = s.ring[static_cast<size_t>((s.readPos + i) & s.ringMask)];
+    out[i] = s.ring[static_cast<size_t>((start + i) & s.ringMask)];
+  s.readPos.store(w, std::memory_order_relaxed);
   return take;
 }
 
