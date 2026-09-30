@@ -61,6 +61,12 @@ paru -S pw-mpris-visualcard-git     # 或 yay -S pw-mpris-visualcard-git
 ```bash
 # Arch
 sudo pacman -S --needed base-devel cairo pango gdk-pixbuf2 libpipewire sdbus-cpp curl
+
+# Fedora
+sudo dnf install gcc-c++ cairo-devel pango-devel pipewire-devel sdbus-cpp-devel libcurl-devel gdk-pixbuf2-devel glib2-devel
+
+# Ubuntu / Debian (24.04+)
+sudo apt install build-essential libcairo2-dev libpango1.0-dev libpipewire-0.3-dev libsdbus-c++-dev libcurl4-openssl-dev libgdk-pixbuf-2.0-dev libglib2.0-dev
 ```
 
 OBS 自带的 `linux-pipewire` 走 xdg-desktop-portal，只能捕获屏幕与窗口，选不到本节点；需要配合插件 [**obs-pwvideo**](https://github.com/tasokait/obs-pwvideo) 使用。

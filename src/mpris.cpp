@@ -3,6 +3,17 @@
 
 #include <sdbus-c++/sdbus-c++.h>
 
+// Compatibility layer for sdbus-c++ 1.x (e.g. Ubuntu 24.04 / Debian)
+#if defined(SDBUS_CPP_MAJOR) && SDBUS_CPP_MAJOR < 2
+namespace sdbus {
+struct ServiceName : std::string {
+  using std::string::string;
+  ServiceName(const std::string& s) : std::string(s) {}
+  ServiceName(std::string&& s) : std::string(std::move(s)) {}
+};
+}  // namespace sdbus
+#endif
+
 #include <unistd.h>
 
 #include <algorithm>
