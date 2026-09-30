@@ -11,6 +11,7 @@
 | 状态采样 | 播放器的 MPRIS 接口（D-Bus） | `NowPlaying` 快照：标题、歌手、专辑、进度、歌词、封面 URL | `mpris`，常驻 D-Bus 连接，不 fork 子进程 |
 | 素材获取 | 封面 URL | cairo 表面（LRU 缓存，最多 3 张） | 后台线程 + 子模块的 `AssetCache` |
 | 版面渲染 | 快照 + 封面表面 | BGRA 帧（预乘 alpha） | `card`，cairo + pango |
+| 频谱（可选） | 播放器自己的 PipeWire monitor 流 | 72 段频段电平 | `audio` + `analyser`，libpipewire + 2048 点 FFT |
 | 视频输出 | BGRA 帧 | `Stream/Output/Video` 节点 | [`pw-video-simple-interface`](https://github.com/zlinux-live-util/pw-video-simple-interface)，libpipewire |
 
 各阶段都在同一进程内通过内存传递数据，进程私有内存 6–25 MB。
@@ -22,6 +23,7 @@
 - 同步歌词读取 MPRIS 的 `xesam:asText`（LRC）。当前句固定在首行槽位并高亮，整块不跳动。
 - 封面自转，暂停时冻结。
 - 进度环、时间、专辑名可分别开关。
+- 可选的径向频谱环（`--viz`，**默认关闭**）：经 PipeWire 定位播放器自己的音频节点，分析该原始流。单色、硬朗、不压到文字，且与封面反向转动。
 - 尺寸任意（`WxH`），版式按高度等比缩放。
 - 帧率上限可调；消费者可以协商到更低，不会超过上限。
 - 调版面无需打开 OBS：`--dump` 直接输出 PNG。
@@ -129,6 +131,14 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 | `--album 0\|1` | `0` | 歌手后追加专辑名 |
 | `--lyrics N` | `0` | 歌词行数，`0` 为关闭 |
 | `--spin SEC` | `24` | 封面自转一圈的秒数，`0` 为不转 |
+| `--viz 0\|1` | `0` | 封面周围的柱状频谱环。**默认关闭；关闭时版面与功能加入之前逐字节一致** |
+| `--viz-bars N` | `72` | 环上的柱数，范围 `8`..`256` |
+| `--viz-source NAME` | | 不按 MPRIS 推断，直接抓这个 PipeWire 音频节点 / 应用。自动匹配失败时用它，节点名即可 |
+| `--viz-fx 0\|1` | `1` | 频谱环后处理：cava 运动模型、频段轴整形、滑动窗口自动增益。**默认开启——正是这条链让柱子看上去有重量**；`--viz-fx 0` 全部关掉，环显示的就是实测频谱 |
+| `--viz-gain DB` | `0` | 以 dB 为单位在最前面做展开 |
+| `--viz-gravity N` | `77` | 柱子的「重量」，`0`..`100`；≤`10` 关闭运动模型（cava 自己的阈值）。对应 cava 的 `noise_reduction`，那是平滑强度，**不是**降噪 |
+| `--viz-shape N` | `50` | 沿频段轴向 1-2-1 模糊的混合比例。`100` 时一根孤柱变成三柱的小山 |
+| `--viz-norm MS` | `2000` | 滑动窗口自动增益的窗口长度（毫秒），`0` 为关 |
 | `--idle last\|hide` | `hide` | 停止播放后是否保留最后一首 |
 | `--node NAME` | `pw-mpris-visualcard` | PipeWire 节点名，也是 OBS 下拉项背后的取值。同名节点会各自带 `(id)` 后缀区分 |
 | `--desc TEXT` | `Music Card` | 节点描述。**OBS 下拉框里显示的就是它**，不是 `--node` |
@@ -136,6 +146,62 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 | `--dump FILE` | | 采样一次渲染为 PNG 后退出 |
 | `--demo` | | 使用假数据，不连接 D-Bus |
 | `--help`, `-h` | | 打印参数简表 |
+
+### 频谱环
+
+`--viz 1` 在封面周围画一圈径向柱子，颜色与进度环同一套单色。默认关闭，不显式打开就不会动到版面。
+
+![带频谱环的卡片](docs/card-viz-460x690.png)
+
+`--size 460x690 --viz 1 --lyrics 4 --time 1 --album 1`，实机播放时截取，用的是默认的 `--viz-fx` 链路。环上的信号就是播放器自己的音频，从 3 点钟方向的最低频段顺时针走：右侧到底部长出的柱是低音，顶部的短柱是几乎空的空气频段。
+
+```bash
+./pw-mpris-visualcard-native --viz 1                          # 跟随 MPRIS 里的播放器
+./pw-mpris-visualcard-native --viz 1 --viz-bars 96             # 更密的环
+./pw-mpris-visualcard-native --viz 1 --viz-source musicfox     # 钉死目标
+```
+
+输入是怎么来的：
+
+1. MPRIS 告诉当前是哪个播放器在播。
+2. 从 PipeWire 注册表枚举音频节点，与该名字匹配。
+3. 把输入流指向该节点的 `object.serial`，PipeWire 就会交出它的 **monitor** 端口——也就是这个播放器在任何设备混音、音量、效果之前送出的信号。
+4. 2048 点 Hann 窗 FFT 折叠成对数间隔的频段，柱子向外生长。
+
+音频进来后**什么都不做**：不加增益、不加噪声门、不做 AGC、不做平滑（这些都是 `--viz-fx` 这条**显示端**链上的事，默认开启，`--viz-fx 0` 可整条关掉）。抓到的本来就是播放器自己的信号，再加一道电平处理，画出来的就不是音乐本身的频谱了。柱高来自一个**固定**的 dB 窗口，所以与实际播放量成正比，曲目之间也可比。
+
+版面方面：环需要整圈留白，而环的下缘正是文字开始的地方，所以开启时是把封面上方的间距**撑开**、同时从纵向预算里扣掉顶部那一份，而不是让柱子长到第一行文字上或跑出画布。环与封面反向、且慢 4 倍，读起来是两个独立的运动。
+
+匹配不到节点时，环会留空、只显示底圈，并打印一行指明问题的提示——不会静默空白。`--demo --viz 1` 会渲染一条假频谱，因此没有播放器也能调版面。
+
+### 频谱环后处理
+
+`--viz-fx 1`（即默认）接上一条处理链，其中**柱子的运动模型直接取自 [cava](https://github.com/karlstav/cava) 的 `cavacore.c`**，常数照抄。默认开启：正是这条链让柱子有重量；`--viz-fx 0` 把它整条拿掉，柱高就回到分析器实测到的值。
+
+```bash
+./pw-mpris-visualcard-native --viz 1                          # 环 + 默认后处理
+./pw-mpris-visualcard-native --viz 1 --viz-fx 0                # 柱高就是实测值
+./pw-mpris-visualcard-native --viz 1 --viz-gravity 95          # 更重，落得更慢
+./pw-mpris-visualcard-native --viz 1 --viz-shape 100           # 最大的小山整形
+```
+
+| 环节 | 开关 | 作用 |
+| --- | --- | --- |
+| 展开 | `--viz-gain DB` | 给每个频段加 dB。允许超过满格、由绘制时按柱钳位，这样各频段保住相对差距，不会在顶部被压成一条平线 |
+| 重力 | `--viz-gravity N` | cava 的运动模型。**上升时**直接用实测值，零平滑；**下落时丢掉实测值**，改由本轮上升的峰值沿一条平方曲线落下来——下落中的柱子是一条合成曲线，无论音频多抖都影响不到它。再加一道积分给动量。这就是它看上去有重量的原因 |
+| 整形 | `--viz-shape N` | 沿频段轴的 1-2-1 模糊，让一根孤柱变成三柱的小山而不是一个孤立尖峰。边界复制，首尾两根不会被绕回去抹成一团 |
+| 自动增益 | `--viz-norm MS` | 把环整体缩放，使其在安静与响亮段落都填满自己的带宽。参考取窗口内最响的一帧并做平滑，增益不会跟瞬态抖。频段之间的相对动态完整保留——它只是一个标量 |
+
+两点需要知道：
+
+- **没有降噪，也没有噪声门。** 抓到的已经是播放器自己的输出，里面每个起伏都是音乐；门限唯一能做的就是削掉音乐本体、把瞬态切掉。环拿到的是一个整体缩放，而不是「决定哪些频段有资格存在」。（cava 那个叫 `noise_reduction` 的旋钮其实是平滑强度，本项目改叫 `--viz-gravity`，免得被误解成降噪。）
+- cava 的帧率补偿是单个 `pow(66/fps, 2.5)`，到 20fps 都还成立，再低就会塌——整根柱子一帧落完，看起来是闪断。因此运动模型单独钳了 dt，让极低的协商帧率变成「落得慢几帧」而不是「柱子闪烁」。
+
+开 `--viz-fx` 时 `--dump` 会先连续渲染一小段再取最后一帧：运动模型与自动增益都需要历史，第一帧不代表实际画面。
+
+**故意没做**的：cava 的圆头柱、颜色渐变、上下翻转——它们与本项目单色硬朗的基调相冲。
+
+抓取侧、匹配规则与文中数字的实测来源，见 [docs/internals.md](docs/internals.md)。
 
 ### 自定义字体
 
@@ -207,6 +273,8 @@ make dump                                                    # 假数据输出�
 - `--fps 24`：约省六分之一。
 - 把尺寸高度调小一档。
 
+`--viz 1` 的增量开销实测约 **0.9% 单核**（`460x690` @30fps，72 柱：绘制 +0.27 ms/帧、FFT +0.20 ms/帧。有封面时环会把它缩小，反而可能更快，两种方向见 [docs/internals.md](docs/internals.md)）；`--viz-fx`（默认开启）再加约 **0.004% 单核**（实测整条链 0.0013 ms/帧）：这些环节只是 72 个元素上的算术扫描，比一次 cairo 填充便宜三个数量级。柱的绘制开销与柱子填满带宽的比例成正比（柱子厚了 50%），与后处理无关。
+
 ## 目录结构
 
 | 路径 | 内容 |
@@ -216,13 +284,17 @@ make dump                                                    # 假数据输出�
 | `LICENSE` | MIT 许可证全文 |
 | `docs/internals.md` | 渲染侧约束、实测数据与调试命令（改代码前先读，目前仅中文） |
 | `docs/card-*.png` | `--dump` 输出的效果图 |
-| `Makefile` | 构建脚本，含 `dump` / `run` / `install-service` / `uninstall-service` 目标 |
+| `Makefile` | 构建脚本，含 `dump` / `run` / `install-service` / `uninstall-service` / `compile-commands` 目标 |
 | `pw-mpris-visualcard.service` | systemd 用户服务模板，由 `make install-service` 渲染安装 |
 | `src/types.hpp` | `Track` / `NowPlaying` / `Config` 数据结构 |
 | `src/mpris.{hpp,cpp}` | sdbus-c++ 常驻连接 + 采样线程 + LRC 解析 |
+| `src/audio.{hpp,cpp}` | PipeWire 抓取：注册表、播放器名匹配、原始单声道采样环形缓冲（`--viz`） |
+| `src/analyser.{hpp,cpp}` | FFT、窗函数、频段折叠与固定 dB 窗口（`--viz`） |
+| `src/fx.{hpp,cpp}` | 频谱环的后处理：展开、cava 运动模型、频段整形、滑动窗口自动增益（`--viz-fx`，默认开启） |
 | `src/card.{hpp,cpp}` | cairo + pango 版面绘制 |
 | `lib/pw-video-simple-interface/` | git 子模块：视频节点（注册、缓冲、帧率协商）与 cairo 辅助模块（帧、文字、素材缓存、HTTP） |
 | `src/main.cpp` | 模块组装与命令行解析 |
+| `.clangd` + `make compile-commands` | 编辑器工具链：生成编译数据库，让 clangd 能解析 PipeWire 与子模块头文件 |
 
 ## 贡献
 

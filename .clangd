@@ -6,10 +6,22 @@
 # a cascade of phantom errors: every pwvideo:: symbol, plus <stdexcept> arriving transitively
 # through the headers it failed to read.
 #
-# These paths are relative to this file, so they hold for every checkout. `make compile-commands`
-# additionally writes compile_commands.json, which carries the full flag set including the
-# pkg-config include paths.
+# Two mechanisms, because neither alone is reliable everywhere:
+#
+#   * `make compile-commands` writes a compilation database carrying the real build's flags. Those
+#     are the only source of the system include paths, which differ per distribution and which
+#     this project only ever takes from pkg-config.
+#   * The paths below are spelled out as well, relative to this file. The submodule lives in the
+#     repository, so they are the same on every checkout and safe to hardcode; this keeps editor
+#     tooling working even when compile_commands.json has not been generated.
 CompileFlags:
   Add:
     - -Ilib/pw-video-simple-interface/src
     - -Ilib/pw-video-simple-interface/extras
+
+# The submodule's sources are compiled as part of this build but are not this project's code, and
+# build/ is generated: keep both out of the analysis so their diagnostics do not bury the project's.
+Diagnostics:
+  Exclude:
+    - "lib/.*"
+    - "build/.*"

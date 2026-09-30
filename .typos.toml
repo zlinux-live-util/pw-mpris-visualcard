@@ -1,0 +1,9 @@
+# typos (crate-ci/typos) configuration.
+#
+# `datas` is the real field name in SPA's buffer API -- spa_buffer holds `spa_data *datas`, not
+# `data` -- and the pipewire submodule's own sources spell it the same way.
+#
+# `iy` is the integer y index in Card::rotateInto(), paired with `ix`.
+[default.extend-words]
+datas = "datas"
+iy = "iy"

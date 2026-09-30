@@ -21,7 +21,30 @@
 #include <cstdio>
 #include <cstring>
 
+#include "cairo_util.hpp"  // pwvideo::SurfacePtr, pwvideo::CairoSurfaceDeleter
+#include "text.hpp"        // pwvideo::TextRenderer, LabelSpec, LabelMetrics, Rgba
+
 namespace oms {
+
+/** The cairo/pango state. Kept out of the header so card.hpp stands on its own. */
+struct Card::Impl {
+  /** Baked card background, cover shadow, cover disc, progress track, ring groove and all text.
+   *  One blit per frame while the key is unchanged. */
+  pwvideo::SurfacePtr layer_;
+  std::string layerKey_;
+
+  /** Rotated cover layer (circular clip + edge antialiasing are baked in; one blit per frame).
+   *  Uses a hand-written row-stepping rotation, about 30% faster than cairo's general transform
+   *  path. */
+  pwvideo::SurfacePtr coverLayer_;
+  double coverAngle_ = 1e9;
+
+  pwvideo::SurfacePtr artScaled_;  // cover scaled to coverD, with a 1px border
+  std::string artScaledKey_;
+
+  pwvideo::TextRenderer text_;
+};
+
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
@@ -36,11 +59,17 @@ constexpr double kRingGapPx = 6.0;
 constexpr double kRingWPx = 3.0;
 constexpr double kLyricMarginTopPx = 3.0;
 
-// Cover diameter: with plate min(62vh,84%) / min(48vh,72%); without plate min(68vh,92%) / min(54vh,82%)
-constexpr double kCoverSolidNoLyric = 0.62;
-constexpr double kCoverSolidLyric = 0.48;
-constexpr double kCoverNoneNoLyric = 0.68;
-constexpr double kCoverNoneLyric = 0.54;
+// Radial spectrum ring (--viz). Read only while the ring is on, so with it off the layout is
+// bit-for-bit what it always was.
+// Radial thickness. Bars are grown 1.5x over the first cut of this feature: at the old value the
+// ring read as a thin fringe around the cover rather than as a spectrum.
+constexpr double kVizBandFrac = 0.052;   // radial thickness, as a fraction of height
+constexpr double kVizBandMinPx = 12.0;   // and the bounds it is clamped to, at 360px
+constexpr double kVizBandMaxPx = 30.0;
+constexpr double kVizClearPx = 1.0;      // clearance between the progress ring and the bars
+constexpr double kVizDuty = 0.68;        // bar width as a fraction of its angular slot
+constexpr double kVizMoatPx = 3.0;       // text-free gap between the bar tips and the first line
+constexpr double kVizSpinRatio = 4.0;    // one bar-ring turn per N cover turns
 
 // Colours (matching :root)
 constexpr double kSolidR = 0x16 / 255.0, kSolidG = 0x17 / 255.0, kSolidB = 0x1c / 255.0;
@@ -49,6 +78,10 @@ constexpr double kFgDimNone = 0.90;   // brightened without a plate, otherwise t
 constexpr double kRingColor = 0.09;
 constexpr double kTrackColor = 0.16;
 constexpr double kAccentColor = 0.92;
+// The ring is monochrome like the rest of the card: near-white bars, one faint groove at their
+// base so the ring still reads as a ring when nothing is playing.
+constexpr double kVizBarColor = 0.94;
+constexpr double kVizTrackColor = 0.15;
 
 int hexVal(char c) {
   if (c >= '0' && c <= '9') return c - '0';
@@ -132,7 +165,16 @@ int activeLyric(const std::vector<Lyric>& L, int64_t ms) {
 
 }  // namespace
 
-Card::Card(Config cfg) : cfg_(std::move(cfg)) {
+Card::Card(Config cfg)
+    : cfg_(std::move(cfg)), impl_(std::make_unique<Impl>()), fx_(cfg_.vizBars) {
+  SpectrumFxOptions fx;
+  fx.enabled = cfg_.vizFx;
+  fx.gainDb = cfg_.vizGainDb;
+  fx.gravity = cfg_.vizGravity;
+  fx.shape = cfg_.vizShape;
+  fx.normMs = cfg_.vizNormMs;
+  fx_.setOptions(fx);
+
   hasBg_ = parseBg(cfg_.bg, bgR_, bgG_, bgB_);
 
   const double W = cfg_.width, H = cfg_.height;
@@ -148,6 +190,20 @@ Card::Card(Config cfg) : cfg_(std::move(cfg)) {
   m_.subSize = maxOf(9.0 * k, 0.029 * H);
   m_.lyricSize = maxOf(10.0 * k, 0.030 * H);
   m_.timeSize = maxOf(9.0 * k, 0.027 * H);
+
+  // Radial spectrum ring. Everything below this block is conditional on --viz, so with it off the
+  // layout reduces to exactly the one that shipped before the ring existed.
+  m_.vizGap = 0.0;
+  m_.vizBand = 0.0;
+  if (cfg_.showViz) {
+    m_.vizBand = std::clamp(kVizBandFrac * H, kVizBandMinPx * k, kVizBandMaxPx * k);
+    // Bars start just outside the progress ring, so the two never touch.
+    m_.vizGap = (cfg_.showProgress ? m_.ringGap + m_.ringW : 0.0) + kVizClearPx * k;
+    // The ring needs clearance all the way round, and the bottom of the ring is exactly where the
+    // text starts. Rather than letting the bars grow over the first line, the cover-to-text gap is
+    // widened until they clear it. The ring's radius is charged to the other three sides below.
+    m_.gap = std::max(m_.gap, m_.vizGap + m_.vizBand + kVizMoatPx * k);
+  }
 
   // Cover diameter: the smaller of "width allows" and "vertical remainder".
   // On a square canvas the vertical limit binds first, so the sides are necessarily left empty --
@@ -165,9 +221,24 @@ Card::Card(Config cfg) : cfg_(std::move(cfg)) {
   }
   double restH = m_.gap + metaH;
   if (cfg_.showTime) restH += m_.gap + 1.35 * m_.timeSize;
-  const double byWidth = 0.92 * W;
-  const double byHeight = 0.96 * H - restH;
-  m_.coverD = std::clamp(std::min(byWidth, byHeight), 0.20 * H, byWidth);
+  double byWidth = 0.92 * W;
+  double byHeight = 0.96 * H - restH;
+  if (cfg_.showViz) {
+    // The ring sits outside the cover all the way round, so the vertical budget has to reserve it
+    // too, not just the width: the width budget gives it a margin on both sides and the widened gap
+    // above already covers it at the bottom. The top was the one side left unpaid, and without this
+    // the ring's outer edge is drawn off the top of the canvas.
+    byWidth -= 2.0 * vizRingR();
+    byHeight -= vizRingR();
+  }
+  // The floor is the fraction of the height the cover would like to keep, which a narrow canvas can
+  // legitimately push past; the min with byWidth keeps clamp's precondition rather than relying on
+  // it holding. With the ring on it is additionally capped at the vertical remainder, so the floor
+  // cannot hand back the room the ring needs at the top and push its outer edge off the canvas.
+  // The 1px outside all of it keeps the radius positive where the remainder is negative outright.
+  double lo = std::min(0.20 * H, byWidth);
+  if (cfg_.showViz) lo = std::min(lo, byHeight);
+  m_.coverD = std::max(1.0, std::clamp(std::min(byWidth, byHeight), lo, byWidth));
 }
 
 Card::~Card() = default;
@@ -205,7 +276,7 @@ cairo_surface_t* Card::staticLayer(const NowPlaying& np, int64_t pos, double k, 
   const int SZ = static_cast<int>(H);
   std::string key = std::to_string(cfg_.width) + "x" + std::to_string(SZ) + "#" +
                     std::to_string(static_cast<int>(cy * 2)) + "#" + textKey(np, pos);
-  if (layer_ && key == layerKey_) return layer_.get();
+  if (impl_->layer_ && key == impl_->layerKey_) return impl_->layer_.get();
 
   cairo_surface_t* surf =
       cairo_image_surface_create(CAIRO_FORMAT_ARGB32, cfg_.width, SZ);
@@ -278,13 +349,64 @@ cairo_surface_t* Card::staticLayer(const NowPlaying& np, int64_t pos, double k, 
     cairo_stroke(cr);
   }
 
+  // The groove the spectrum bars grow out of. Static like everything else above, so the ring still
+  // reads as a ring when nothing is playing or no audio node could be found.
+  if (cfg_.showViz) {
+    cairo_set_line_width(cr, 1.0);
+    cairo_set_source_rgba(cr, 1, 1, 1, kVizTrackColor);
+    cairo_arc(cr, cx, cy, coverR + m_.vizGap, 0, 2 * kPi);
+    cairo_stroke(cr);
+  }
+
   // Text joins the same layer (including the shadow stroke when there is no plate)
   drawTexts(cr, np, pos, yMeta, textW);
 
   cairo_destroy(cr);
-  layer_ = pwvideo::SurfacePtr(surf, pwvideo::CairoSurfaceDeleter{});
-  layerKey_ = std::move(key);
-  return layer_.get();
+  impl_->layer_ = pwvideo::SurfacePtr(surf, pwvideo::CairoSurfaceDeleter{});
+  impl_->layerKey_ = std::move(key);
+  return impl_->layer_.get();
+}
+
+void Card::setSpectrum(const float* levels, int count) {
+  const int n = levels ? std::clamp(count, 0, kMaxVizBars) : 0;
+  for (int i = 0; i < n; ++i) viz_[i] = levels[i];
+  for (int i = n; i < vizCount_; ++i) viz_[i] = 0.0f;  // the ring shrank: do not leave stale bars
+  vizCount_ = n;
+}
+
+void Card::drawSpectrum(cairo_t* cr, double cx, double cy, double coverR) {
+  const int n = vizCount_;
+  if (n <= 0) return;
+  const double r0 = coverR + m_.vizGap;
+  const double slot = 2 * kPi / n;
+  const double half = slot * kVizDuty * 0.5;
+  // cos/sin of the half slot are the same for every bar.
+  const double ch = std::cos(half), sh = std::sin(half);
+
+  cairo_set_source_rgba(cr, 1, 1, 1, kVizBarColor);
+  for (int i = 0; i < n; ++i) {
+    const double v = viz_[i];
+    if (v <= 0.0f) continue;  // silence: leave a gap rather than a stub
+    // Levels may exceed 1 after --viz-gain or the auto-gain; the band is the hard ceiling.
+    const double r1 = r0 + m_.vizBand * std::min(v, 1.0);
+    // The sides are chords, not arcs. At this radius and slot width the arc's deviation from the
+    // chord is a fraction of a pixel, and measured over 72 bars a chord is 1.2x the speed of two
+    // cairo_arc calls (0.24 vs 0.29 ms). cos/sin of the slot are constant, so each bar costs two
+    // trig calls and four multiplies rather than eight.
+    //
+    // One fill per bar, not one fill for the whole ring: measured the other way round, batching all
+    // 72 quads into a single path and filling once is 1.4x SLOWER (0.34 vs 0.25 ms), because cairo
+    // tessellates the combined path as one unit while each 4-gon on its own is trivial.
+    const double a = vizAngle_ + slot * i;
+    const double ca = std::cos(a), sa = std::sin(a);
+    cairo_new_path(cr);
+    cairo_move_to(cr, cx + (ca * ch + sa * sh) * r0, cy + (sa * ch - ca * sh) * r0);
+    cairo_line_to(cr, cx + (ca * ch - sa * sh) * r0, cy + (sa * ch + ca * sh) * r0);
+    cairo_line_to(cr, cx + (ca * ch - sa * sh) * r1, cy + (sa * ch + ca * sh) * r1);
+    cairo_line_to(cr, cx + (ca * ch + sa * sh) * r1, cy + (sa * ch - ca * sh) * r1);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+  }
 }
 
 bool Card::visible(const NowPlaying& np) const {
@@ -306,7 +428,7 @@ void Card::drawLine(cairo_t* cr, const std::string& s, double size, double alpha
   // chain is handed over as-is; pango resolves it, each name through fontconfig.
   if (!cfg_.font.empty()) spec.family = cfg_.font;
 
-  PangoLayout* l = text_.layout(cr, s, spec);
+  PangoLayout* l = impl_->text_.layout(cr, s, spec);
   const pwvideo::LabelMetrics m = pwvideo::TextRenderer::measure(l);
   const double ty = yTop + (boxH - m.height) / 2.0;
 
@@ -441,10 +563,20 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
   const double k = H / kBaseSize;
   const Track& t = np.track;
 
+  // One dt for the frame: the cover spin, the ring's counter-rotation and the --viz-fx chain (bar
+  // fall, auto-gain) all advance on it, so they cannot drift apart.
+  const double dt =
+      lastRenderAt_ != 0 ? static_cast<double>(nowMs - lastRenderAt_) / 1000.0 : 0.0;
+
   // Cover spin: frozen while paused
   if (lastRenderAt_ != 0 && np.playing() && cfg_.spinSeconds > 0) {
-    const double dt = static_cast<double>(nowMs - lastRenderAt_) / 1000.0;
-    if (dt > 0 && dt < 1.0) spinAngle_ += dt / cfg_.spinSeconds * 2 * kPi;
+    if (dt > 0 && dt < 1.0) {
+      const double turn = dt / cfg_.spinSeconds * 2 * kPi;
+      spinAngle_ += turn;
+      // The bar ring turns the other way and a quarter as fast, so the two read as separate
+      // motions rather than one chasing the other. --spin 0 stops both.
+      if (cfg_.showViz) vizAngle_ -= turn / kVizSpinRatio;
+    }
   }
   lastRenderAt_ = nowMs;
 
@@ -472,12 +604,16 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
 
   double metaH = titleBox + m_.metaGap + subBox;
   if (nLy > 0) metaH += m_.metaGap + lyricBox;
-  const double total = m_.coverD + m_.gap + metaH + (showTimes ? m_.gap + timeBox : 0.0);
+  // The ring adds a band of radius around the cover, so it enters the centred block as height above
+  // it; at the bottom the widened cover-to-text gap already reserves the same band.
+  const double ringAllow = vizRingR();
+  const double total =
+      ringAllow + m_.coverD + m_.gap + metaH + (showTimes ? m_.gap + timeBox : 0.0);
 
   double y = (H - total) / 2.0;
   const double cx = W / 2.0;
-  const double cy = y + coverR;
-  const double yMeta = y + m_.coverD + m_.gap;
+  const double cy = y + ringAllow + coverR;
+  const double yMeta = y + ringAllow + m_.coverD + m_.gap;
   const double textW = W - 2 * m_.pad;
 
   int64_t pos = np.position;
@@ -509,7 +645,7 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
       // 1) Scale once to coverD (once per track), with a 1px border
       char ak[96];
       std::snprintf(ak, sizeof ak, "%p#%d", static_cast<const void*>(cover), side);
-      if (!artScaled_ || artScaledKey_ != ak) {
+      if (!impl_->artScaled_ || impl_->artScaledKey_ != ak) {
         cairo_surface_t* ss = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, side, side);
         if (cairo_surface_status(ss) == CAIRO_STATUS_SUCCESS) {
           cairo_t* sc = cairo_create(ss);
@@ -519,10 +655,10 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
           cairo_pattern_set_filter(cairo_get_source(sc), CAIRO_FILTER_BILINEAR);
           cairo_paint(sc);
           cairo_destroy(sc);
-          artScaled_ = pwvideo::SurfacePtr(ss, pwvideo::CairoSurfaceDeleter{});
-          artScaledKey_ = ak;
-          coverLayer_.reset();
-          coverAngle_ = 1e9;
+          impl_->artScaled_ = pwvideo::SurfacePtr(ss, pwvideo::CairoSurfaceDeleter{});
+          impl_->artScaledKey_ = ak;
+          impl_->coverLayer_.reset();
+          impl_->coverAngle_ = 1e9;
         } else {
           cairo_surface_destroy(ss);
         }
@@ -530,34 +666,34 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
 
       // 2) True rotation every frame. Quantising by angle saves 0.4ms, but at a 24-second
       //    revolution it updates at only 7.5Hz -- visibly stuttery -- so no saving without smoothing.
-      if (artScaled_) {
-        if (!coverLayer_ ||
-            cairo_image_surface_get_width(coverLayer_.get()) != side ||
-            spinAngle_ != coverAngle_) {
-          if (!coverLayer_ ||
-              cairo_image_surface_get_width(coverLayer_.get()) != side) {
+      if (impl_->artScaled_) {
+        if (!impl_->coverLayer_ ||
+            cairo_image_surface_get_width(impl_->coverLayer_.get()) != side ||
+            spinAngle_ != impl_->coverAngle_) {
+          if (!impl_->coverLayer_ ||
+              cairo_image_surface_get_width(impl_->coverLayer_.get()) != side) {
             cairo_surface_t* cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, side, side);
             if (cairo_surface_status(cs) != CAIRO_STATUS_SUCCESS) {
               cairo_surface_destroy(cs);
               cs = nullptr;
             }
-            coverLayer_ = cs ? pwvideo::SurfacePtr(cs, pwvideo::CairoSurfaceDeleter{}) : nullptr;
+            impl_->coverLayer_ = cs ? pwvideo::SurfacePtr(cs, pwvideo::CairoSurfaceDeleter{}) : nullptr;
           }
-          if (coverLayer_) {
-            cairo_surface_flush(coverLayer_.get());
+          if (impl_->coverLayer_) {
+            cairo_surface_flush(impl_->coverLayer_.get());
             rotateInto(
                 reinterpret_cast<const uint32_t*>(
-                    cairo_image_surface_get_data(artScaled_.get())),
+                    cairo_image_surface_get_data(impl_->artScaled_.get())),
                 side, side,
-                reinterpret_cast<uint32_t*>(cairo_image_surface_get_data(coverLayer_.get())),
-                cairo_image_surface_get_stride(coverLayer_.get()) / 4, side, m_.coverD / 2.0,
+                reinterpret_cast<uint32_t*>(cairo_image_surface_get_data(impl_->coverLayer_.get())),
+                cairo_image_surface_get_stride(impl_->coverLayer_.get()) / 4, side, m_.coverD / 2.0,
                 spinAngle_);
-            cairo_surface_mark_dirty(coverLayer_.get());
-            coverAngle_ = spinAngle_;
+            cairo_surface_mark_dirty(impl_->coverLayer_.get());
+            impl_->coverAngle_ = spinAngle_;
           }
         }
-        if (coverLayer_) {
-          cairo_set_source_surface(cr, coverLayer_.get(), cx - coverR - 1, cy - coverR - 1);
+        if (impl_->coverLayer_) {
+          cairo_set_source_surface(cr, impl_->coverLayer_.get(), cx - coverR - 1, cy - coverR - 1);
           cairo_paint(cr);
         }
       }
@@ -566,6 +702,12 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
     // "\u266a" placeholder of .card.no-art
     drawLine(cr, "\u266a", maxOf(18.0 * k, 0.14 * H), kFgDimSolid, cx - coverR,
              m_.coverD, cy - coverR, m_.coverD, 1, false);
+  }
+
+  /* ---------------- radial spectrum ---------------- */
+  if (cfg_.showViz) {
+    fx_.apply(viz_, vizCount_, dt);
+    drawSpectrum(cr, cx, cy, coverR);
   }
 
   /* ---------------- progress arc ---------------- */
