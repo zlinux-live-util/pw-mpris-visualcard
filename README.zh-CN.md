@@ -124,6 +124,8 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 | `--size WxH` | `360x360` | 输出尺寸；只写一个数字表示正方形。**版式全部按高度等比缩放，宽度只决定左右留白**——圆形封面受纵向预算约束，方画布横向必然富余较多 |
 | `--fps N` | `30` | **帧率上限**。向 PipeWire 声明的是 `[N/4, N]` 区间，消费者可协商到更低但不会超过 N；实际推帧按协商结果执行，下限 5fps |
 | `--bg MODE` | `none` | `none` 完全透明；`solid` 不透明深色底；也可给 `#rrggbb` |
+| `--font NAME[,NAME...]` | `sans-serif` | 卡片所有文字的字体 family。逗号分隔即回退链，由 pango **逐字符**回退，所以可以把拉丁字体和中文字体配成一条链 |
+| `--font-file PATH` | | 启动时把字体文件（或整个目录）注册进 fontconfig，从而免安装、免 root 就能用下载来的 `.ttf`/`.otf`/`.ttc`。可重复传入；`~/` 会展开 |
 | `--progress 0\|1` | `1` | 进度环 |
 | `--time 0\|1` | `0` | 显示 `1:23 / 3:12` |
 | `--album 0\|1` | `0` | 歌手后追加专辑名 |
@@ -201,6 +203,36 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 
 抓取侧、匹配规则与文中数字的实测来源，见 [docs/internals.md](docs/internals.md)。
 
+### 自定义字体
+
+只要 fontconfig 认得就能用，无需配置字体列表。
+
+```bash
+# 按字体名
+--font "Inter"
+
+# 回退链：拉丁用 Inter，其余交给 Noto
+--font "Inter,Noto Sans CJK SC"
+
+# 未安装到系统里的字体——不需要 root，也不用往 /usr/share/fonts 里拷
+--font-file ~/Downloads/MyFont.ttf
+```
+
+`--font-file` 只在本进程内注册，**不需要再指定字体名**：family 名是从字体文件自身读出来的，所以单写 `--font-file` 就够了。以下情况再搭配 `--font`：不想手打字体自报的名字、`.ttc` 想用非首个字体面、或者想按顺序试多个已注册文件。传目录则注册该目录下全部字体。
+
+```bash
+# 整包字体，先匹配到的生效
+--font-file ~/Downloads/fonts --font-file ~/Downloads/Display.ttf
+```
+
+这里的一切都刻意**不致命**：文件缺失或字体名不认识时只告警，卡片退回默认字体渲染——字形不对也比起不来强。实际生效的字体会在启动时打印：
+
+```
+  Font: Inter,Noto Sans CJK SC
+```
+
+两点值得知道。所选字体没覆盖的字符仍能显示——pango 会逐字符回退，所以纯拉丁字体下中文歌词照样出得来。标题按 semibold 字重绘制，若字体没有 semibold 字面就退回常规字重，而不是合成一个假粗体。
+
 ### 调版面无需打开 OBS
 
 ```bash
@@ -252,7 +284,7 @@ make dump                                                    # 假数据输出�
 | `LICENSE` | MIT 许可证全文 |
 | `docs/internals.md` | 渲染侧约束、实测数据与调试命令（改代码前先读，目前仅中文） |
 | `docs/card-*.png` | `--dump` 输出的效果图 |
-| `Makefile` | 构建脚本，含 `dump` / `run` / `install-service` / `uninstall-service` / `compile-db` 目标 |
+| `Makefile` | 构建脚本，含 `dump` / `run` / `install-service` / `uninstall-service` / `compile-commands` 目标 |
 | `pw-mpris-visualcard.service` | systemd 用户服务模板，由 `make install-service` 渲染安装 |
 | `src/types.hpp` | `Track` / `NowPlaying` / `Config` 数据结构 |
 | `src/mpris.{hpp,cpp}` | sdbus-c++ 常驻连接 + 采样线程 + LRC 解析 |
@@ -262,7 +294,7 @@ make dump                                                    # 假数据输出�
 | `src/card.{hpp,cpp}` | cairo + pango 版面绘制 |
 | `lib/pw-video-simple-interface/` | git 子模块：视频节点（注册、缓冲、帧率协商）与 cairo 辅助模块（帧、文字、素材缓存、HTTP） |
 | `src/main.cpp` | 模块组装与命令行解析 |
-| `.clangd` + `make compile-db` | 编辑器工具链：生成编译数据库，让 clangd 能解析 PipeWire 与子模块头文件 |
+| `.clangd` + `make compile-commands` | 编辑器工具链：生成编译数据库，让 clangd 能解析 PipeWire 与子模块头文件 |
 
 ## 贡献
 

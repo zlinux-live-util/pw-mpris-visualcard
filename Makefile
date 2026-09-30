@@ -2,7 +2,7 @@
 # All dependencies are distribution system libraries; no third-party package manager involved.
 
 CXX      ?= g++
-PKGS     := cairo pangocairo libpipewire-0.3 sdbus-c++ libcurl gdk-pixbuf-2.0 glib-2.0
+PKGS     := cairo pangocairo fontconfig libpipewire-0.3 sdbus-c++ libcurl gdk-pixbuf-2.0 glib-2.0
 # -O3 -march=native pays off clearly on the rotation hot loop (measured -22% per frame).
 # The cost is a binary bound to the local instruction set; to run elsewhere or distribute it,
 # use make PORTABLE=1.
@@ -40,7 +40,7 @@ UNIT         := pw-mpris-visualcard.service
 UNIT_DIR     ?= $(HOME)/.config/systemd/user
 SERVICE_ARGS ?= --node pw-mpris-visualcard --size 460x690 --fps 30 --lyrics 3
 
-.PHONY: all clean dump run install-service uninstall-service compile-db
+.PHONY: all clean dump run install-service uninstall-service compile-commands
 
 all: $(TARGET)
 
@@ -78,28 +78,23 @@ uninstall-service:
 	systemctl --user daemon-reload
 	@echo "Uninstalled $(UNIT_DIR)/$(UNIT)"
 
-# Emit a compilation database for clangd and other editor tooling. The include paths come from the
-# same pkg-config calls the build uses, so nothing is hardcoded per distribution and an editor
-# reading this file sees exactly the flags the compiler gets.
-compile-db:
-	@{ printf '['; \
-	   sep=''; \
-	   for src in $(SRC); do \
-	     printf '%s{"directory":"%s","file":"%s","command":"$(CXX) $(CXXFLAGS) -MMD -MP -c -o %s %s"}' \
-	       "$$sep" "$(CURDIR)" "$$src" "$${src%.cpp}.o" "$$src"; \
-	     sep=','; \
-	   done; \
-	   for src in $(PWNODE_SRC); do \
-	     printf '%s{"directory":"%s","file":"%s","command":"$(CXX) $(CXXFLAGS) -MMD -MP -c -o build/pwvideo/%s %s"}' \
-	       "$$sep" "$(CURDIR)" "$$src" "$${src#$(PWNODE_DIR)/%.cpp}" "$$src"; \
-	     sep=','; \
-	   done; \
-	   printf ']\n'; \
-	 } > compile_commands.json
-	@echo "Wrote compile_commands.json ($$(grep -o '"file"' compile_commands.json | wc -l) entries)"
-
 clean:
 	rm -f $(OBJ) $(DEP) $(TARGET)
 	rm -rf build
+
+# Emit compile_commands.json for editor tooling (clangd, LSP servers). The submodule headers under
+# lib/ are only reachable through the -I flags above, so without this database a language server
+# cannot resolve "text.hpp" / "assetcache.hpp" and reports a cascade of phantom errors.
+compile-commands:
+	@printf '[\n' > compile_commands.json
+	@first=1; \
+	for f in $(SRC) $(PWNODE_SRC); do \
+	  [ $$first -eq 1 ] || printf ',\n' >> compile_commands.json; \
+	  first=0; \
+	  printf '  {\n    "directory": "%s",\n    "file": "%s",\n    "command": "%s %s -c %s"\n  }' \
+	    "$(CURDIR)" "$$f" "$(CXX)" "$(CXXFLAGS)" "$$f" >> compile_commands.json; \
+	done; \
+	printf '\n]\n' >> compile_commands.json
+	@echo "Wrote compile_commands.json"
 
 -include $(DEP)

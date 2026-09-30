@@ -19,6 +19,7 @@
 #include "audio.hpp"
 #include "card.hpp"
 #include "cairo_util.hpp"
+#include "fonts.hpp"
 #include "mpris.hpp"
 #include "pwvideo.hpp"
 #include "types.hpp"
@@ -26,6 +27,8 @@
 namespace {
 
 using namespace oms;
+
+constexpr const char* kDefaultFont = "sans-serif";
 
 int64_t steadyMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -40,14 +43,22 @@ constexpr double kPiDemo = 3.14159265358979323846;
  *  the window size because the hop is a quarter of it. */
 constexpr int kVizFftSize = 2048;
 
-void usage() {
-  std::printf(
+/** The option list goes wherever the caller is already writing: stdout for --help, stderr when
+ *  the reason it is being printed is a failure. */
+void usage(std::FILE* out) {
+  std::fprintf(
+      out,
       "pw-mpris-visualcard (native)\n"
       "\n"
       "  --size WxH      Output size. 540 = 540x540; 360x540 = portrait; default 360x360\n"
       "                  Layout scales by height; the width sets the side margins\n"
       "  --fps N         Frame-rate ceiling, default 30 (a consumer may go lower, never higher)\n"
       "  --bg MODE       Card background: none (default, fully transparent) | solid | #rrggbb\n"
+      "  --font NAME[,NAME...]  Font family for all card text; a comma list is a fallback\n"
+      "                  chain, default sans-serif (the fontconfig default)\n"
+      "  --font-file PATH      Register a font file (or a directory of them) with fontconfig\n"
+      "                  at startup, so a downloaded .ttf/.otf works without installing it;\n"
+      "                  repeatable. Without --font its own family name is used\n"
       "  --progress 0|1  Progress ring, default 1\n"
       "  --time 0|1      Show time, default 0\n"
       "  --album 0|1     Show album, default 0\n"
@@ -74,9 +85,13 @@ void usage() {
       "  --help\n");
 }
 
-/** Returns true when the program should run, false when it already did its job (--help) and
- *  should exit successfully. Anything wrong with the arguments throws. */
-bool parseArgs(int argc, char** argv, Config& cfg, std::string& dump, bool& demo,
+/** Argument parsing has three outcomes, not two: a bad flag is not the same as a request for help.
+ *  Folding them into one bool made an unknown argument exit 0, so a typo was indistinguishable
+ *  from success -- and under Restart=always that is a silent restart loop reporting SUCCESS.
+ *  Anything else wrong with the arguments throws, and main prints the usage text. */
+enum class Args { Ok, Help, Error };
+
+Args parseArgs(int argc, char** argv, Config& cfg, std::string& dump, bool& demo,
                bool& verbose) {
   auto next = [&](int& i) -> std::string {
     if (i + 1 >= argc) throw std::runtime_error("missing argument value");
@@ -85,8 +100,8 @@ bool parseArgs(int argc, char** argv, Config& cfg, std::string& dump, bool& demo
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--help" || a == "-h") {
-      usage();
-      return false;
+      usage(stdout);
+      return Args::Help;
     } else if (a == "--size") {
       const std::string v = next(i);
       const size_t x = v.find_first_of("xX*");
@@ -100,6 +115,10 @@ bool parseArgs(int argc, char** argv, Config& cfg, std::string& dump, bool& demo
       cfg.fps = std::max(1, std::stoi(next(i)));
     } else if (a == "--bg") {
       cfg.bg = next(i);
+    } else if (a == "--font") {
+      cfg.font = next(i);
+    } else if (a == "--font-file") {
+      cfg.fontFiles.push_back(next(i));
     } else if (a == "--progress") {
       cfg.showProgress = next(i) != "0";
     } else if (a == "--time") {
@@ -139,12 +158,17 @@ bool parseArgs(int argc, char** argv, Config& cfg, std::string& dump, bool& demo
     } else if (a == "--verbose" || a == "-v") {
       verbose = true;
     } else {
-      // Thrown rather than "print and stop": returning here used to exit 0, which under
-      // Restart=always turns a typo into a silent restart loop that reports SUCCESS.
-      throw std::runtime_error("unknown argument: " + a);
+      // Reported rather than thrown, because this is the one error that names the whole option
+      // list: it is the case where the user's flag does not exist, not a bad value. Both the
+      // message and the usage text go to stderr, so a caller that captures stdout still sees
+      // why the run died, and the exit code is 2 -- never 0, which under Restart=always would be
+      // a silent restart loop reporting SUCCESS.
+      std::fprintf(stderr, "unknown argument: %s\n\n", a.c_str());
+      usage(stderr);
+      return Args::Error;
     }
   }
-  return true;
+  return Args::Ok;
 }
 
 /* ---------------- Demo data (--demo) ---------------- */
@@ -210,6 +234,56 @@ std::vector<float> demoSpectrum(int n, int64_t nowMs) {
   return out;
 }
 
+/* ---------------- Font setup ---------------- */
+
+/** Registers the --font-file files and settles on the family chain to render with.
+ *
+ *  Runs before anything pango-related is constructed: a PangoFcFontMap snapshots the family list
+ *  fontconfig reported at construction time, so a file registered after the first context exists
+ *  would never be seen. Card owns the only TextRenderer, and main calls this before App, which
+ *  keeps that ordering true.
+ *
+ *  Never fails: a bad path or a family that is not installed is a warning plus a fallback, because
+ *  a card that renders in the wrong font beats a card that does not start. */
+void applyFontConfig(Config& cfg) {
+  std::vector<std::string> fromFiles;
+  for (const std::string& path : cfg.fontFiles) {
+    std::string err;
+    if (!registerFontFile(path, err)) {
+      std::fprintf(stderr, "warning: %s\n", err.c_str());
+      continue;
+    }
+    // A file used on its own should not require the user to also know its family name.
+    const std::string fam = familyOfFontFile(path);
+    if (!fam.empty() && std::find(fromFiles.begin(), fromFiles.end(), fam) == fromFiles.end())
+      fromFiles.push_back(fam);
+  }
+
+  if (cfg.font.empty() && !fromFiles.empty()) {
+    for (const std::string& f : fromFiles) {
+      if (!cfg.font.empty()) cfg.font += ',';
+      cfg.font += f;
+    }
+  }
+  if (cfg.font.empty()) cfg.font = kDefaultFont;
+
+  // Warn only for the entries before the first one that resolves: a chain is a legitimate way to
+  // ask for "this font, else that one", and past the first hit pango does the falling back.
+  bool any = false;
+  for (const std::string& f : splitFontList(cfg.font)) {
+    if (familyAvailable(f)) {
+      any = true;
+      break;
+    }
+    std::fprintf(stderr, "warning: font family not installed: %s\n", f.c_str());
+  }
+  if (!any) {
+    std::fprintf(stderr, "warning: no usable family in \"%s\", falling back to %s\n",
+                 cfg.font.c_str(), kDefaultFont);
+    cfg.font = kDefaultFont;
+  }
+}
+
 /* ---------------- Application ---------------- */
 
 class App {
@@ -265,8 +339,9 @@ class App {
     std::printf(
         "pw-mpris-visualcard (native) started\n"
         "  PipeWire node: %s   [select it as a \"PipeWire Video\" source in OBS]\n"
-        "  Size: %dx%d @ %d fps\n",
-        cfg_.nodeName.c_str(), cfg_.width, cfg_.height, cfg_.fps);
+        "  Size: %dx%d @ %d fps\n"
+        "  Font: %s\n",
+        cfg_.nodeName.c_str(), cfg_.width, cfg_.height, cfg_.fps, cfg_.font.c_str());
     std::fflush(stdout);
 
     video.run();  // Blocks until SIGINT/SIGTERM
@@ -490,13 +565,24 @@ int main(int argc, char** argv) {
   bool demo = false;
   bool verbose = false;
   try {
-    if (!parseArgs(argc, argv, cfg, dumpPath, demo, verbose)) return 0;
+    switch (parseArgs(argc, argv, cfg, dumpPath, demo, verbose)) {
+      case Args::Help: return 0;
+      case Args::Error: return 2;  // same code as a malformed value, below
+      case Args::Ok: break;
+    }
   } catch (const std::exception& e) {
     // The message names the offending flag; the usage text then shows what the current build
     // actually accepts, which matters when an argument was renamed or removed.
     std::fprintf(stderr, "argument error: %s\n\n", e.what());
-    usage();
+    usage(stderr);
     return 2;
+  }
+
+  try {
+    applyFontConfig(cfg);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "font setup failed: %s\n", e.what());
+    return 1;
   }
 
   try {

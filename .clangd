@@ -1,22 +1,26 @@
-# Editor / tooling configuration.
+# clangd / LSP configuration.
 #
-# clangd does not run pkg-config and does not read the Makefile, so without help it cannot resolve
-# the PipeWire headers or the submodule's extras/, and every one of those reads as "file not found"
-# followed by a cascade of "unknown type name" on the pwvideo:: types.
+# The video-node library is a git submodule whose headers live outside this project's src/, so
+# "text.hpp" and "assetcache.hpp" are only reachable through the -I flags the Makefile passes. An
+# editor language server without a compilation database therefore cannot resolve them, and reports
+# a cascade of phantom errors: every pwvideo:: symbol, plus <stdexcept> arriving transitively
+# through the headers it failed to read.
 #
 # Two mechanisms, because neither alone is reliable everywhere:
-#   * `make compile-db` writes a compilation database carrying the real build's flags. Those are the
-#     only source of the system include paths, which differ per distribution and which this project
-#     only ever takes from pkg-config.
-#   * The submodule paths are spelled out below as well, relative to the project root. They live in
-#     the repository, so they are the same on every distribution and are safe to hardcode; this
-#     keeps editor tooling working even when compile_commands.json has not been generated.
+#
+#   * `make compile-commands` writes a compilation database carrying the real build's flags. Those
+#     are the only source of the system include paths, which differ per distribution and which
+#     this project only ever takes from pkg-config.
+#   * The paths below are spelled out as well, relative to this file. The submodule lives in the
+#     repository, so they are the same on every checkout and safe to hardcode; this keeps editor
+#     tooling working even when compile_commands.json has not been generated.
 CompileFlags:
   Add:
     - -Ilib/pw-video-simple-interface/src
     - -Ilib/pw-video-simple-interface/extras
 
-# The project builds every src/*.cpp, so keep third-party and generated code out of the analysis.
+# The submodule's sources are compiled as part of this build but are not this project's code, and
+# build/ is generated: keep both out of the analysis so their diagnostics do not bury the project's.
 Diagnostics:
   Exclude:
     - "lib/.*"
