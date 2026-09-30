@@ -53,7 +53,8 @@ class SpectrumFx {
   const SpectrumFxOptions& options() const { return opts_; }
 
   /** Applies the chain to `count` levels in place. `dt` is the time since the previous call in
-   *  seconds; values <= 0 are read as one frame at 60 fps, which is cava's reference rate.
+   *  seconds; values <= 0 are read as one frame at 66 fps, cava's reference rate (upstream's
+   *  `cavacore.c` really does use 66, not 60).
    *
    *  `levels` must hold at least `count` entries; a count larger than size() is clamped down, but
    *  the caller cannot be protected from lying about its own buffer.

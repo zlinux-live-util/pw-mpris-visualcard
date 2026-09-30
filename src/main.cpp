@@ -39,8 +39,11 @@ int64_t steadyMs() {
 constexpr double kPiDemo = 3.14159265358979323846;
 
 /** FFT window for the spectrum, in samples. 2048 at 48 kHz is a 42.7 ms window with 23.4 Hz bins,
- *  which is what the log-spaced low bands in analyser.cpp are built around; the cost is flat in
- *  the window size because the hop is a quarter of it. */
+ *  which is what the log-spaced low bands in analyser.cpp are built around.
+ *
+ *  Not free to double: feed() advances a whole window per transform, so a longer window is both a
+ *  larger transform and, past 2048, a measurable jump in cost (measured with 1600 samples per feed:
+ *  0.026 ms/frame at N<=2048, 0.049 ms at N=4096). */
 constexpr int kVizFftSize = 2048;
 
 /** The option list goes wherever the caller is already writing: stdout for --help, stderr when

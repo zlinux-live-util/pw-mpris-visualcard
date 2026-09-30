@@ -22,7 +22,14 @@ class Analyser {
   void setRate(int rate);
 
   /** Appends mono samples, oldest first. Whatever cannot be folded into a window is dropped, so
-   *  a caller that falls behind loses history rather than latency. */
+   *  a caller that falls behind loses history rather than latency.
+   *
+   *  Note the bound this implies: the history buffer is exactly fftSize() long, so a single call
+   *  larger than kMaxTransformsPerFeed windows' worth (8 * fftSize, currently 16384) leaves a
+   *  residual whose window wraps and reads a phase-discontinuous signal. levels() then reports a
+   *  smeared spectrum. Main's vizBuf_ is sized exactly to that limit and read() cannot exceed it,
+   *  so the app never hits this; anything feeding a bigger block must size its own buffer or clear
+   *  levels() first. */
   void feed(const float* samples, size_t count);
 
   /** bands() entries, each in 0..1, lowest frequency first. Valid after the first feed(). */

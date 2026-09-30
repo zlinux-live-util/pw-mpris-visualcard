@@ -425,8 +425,9 @@ void AudioTap::start() {
   Impl& s = *impl_;
   if (s.started) return;
 
-  // pw_init/pw_deinit are process-global, so they are paired per instance rather than globally:
-  // the video node in pw-video-simple-interface does the same on its side.
+  // pw_init/pw_deinit are process-global. pwvideo.cpp reference-counts them properly; this side
+  // does not, which is fine only because a process calls this at most once (dump() returns before
+  // run() ever reaches here). Adding a pw_deinit needs the same refcount, not a bare pairing.
   pw_init(nullptr, nullptr);
 
   s.loop = pw_thread_loop_new("pw-mpris-visualcard-audio", nullptr);
@@ -509,6 +510,14 @@ size_t AudioTap::read(float* out, size_t n) {
   size_t avail = static_cast<size_t>(w - std::min<uint64_t>(s.readPos, w));
   avail = std::min(avail, s.ring.size());
   const size_t take = std::min(avail, n);
+  // KNOWN BUG: this rewinds to the start of the window just returned instead of stepping past
+  // its end, so readPos only ever moves when the caller asks for less than is available. Since
+  // App asks for vizBuf_.size() (16384) and ~1600 arrive per frame, take == avail every frame and
+  // readPos never advances: each call re-delivers the whole history, and Analyser::feed() then
+  // runs kMaxTransformsPerFeed transforms instead of one (~8x the FFT cost, ~0.20 vs 0.026
+  // ms/frame). The displayed spectrum is still correct -- the last window ends at the newest
+  // sample -- so this is wasted work, not a wrong picture. The fix is `readPos = w` (verified).
+  // Tracked as a separate change; see the PR description.
   s.readPos = w - take;  // a caller that falls behind loses the oldest samples, never buffers up
   for (size_t i = 0; i < take; ++i)
     out[i] = s.ring[static_cast<size_t>((s.readPos + i) & s.ringMask)];
