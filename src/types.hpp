@@ -44,6 +44,12 @@ struct Config {
   // dark background; a literal #rrggbb is also accepted. Transparent mode automatically
   // enlarges the cover, brightens secondary text and adds a drop shadow.
   std::string bg = "none";
+  // Font family for every piece of card text. A comma-separated list is a fallback chain, which
+  // fontconfig resolves itself. Empty means the pango/fontconfig default (sans-serif).
+  std::string font;
+  // Font files/directories registered with fontconfig at startup, so a downloaded font can be used
+  // without installing it system-wide. Applied before the first pango context exists.
+  std::vector<std::string> fontFiles;
   bool showProgress = true;    // progress ring
   bool showTime = false;       // time
   bool showAlbum = false;      // album name

@@ -81,6 +81,54 @@ hi = ((((a >> 8) & 0x00FF00FF) * iw + ((b >> 8) & 0x00FF00FF) * w) >> 8) & 0x00F
 return lo | (hi << 8);
 ```
 
+## 字体：一条必须遵守的时序约束
+
+`--font` / `--font-file` 落到 `Card::drawLine()` 的 `LabelSpec::family`，由
+`pango_font_description_set_family()` 交给 pango。逗号分隔的链由 pango 解析：每个族名都交给
+fontconfig 查询，pango 再按字符挑有覆盖的字体，所以「拉丁字体 + 中文字体」配成一条链即可；没有
+semibold 字面的字体，标题会退回常规字重而不是合成假粗体。
+
+唯一需要当心的是**注册时机**：
+
+> `FcConfigAppFontAddFile()` 必须在进程里第一个 `PangoContext` 创建之前调用。
+
+`PangoFcFontMap` 在构造时会把 fontconfig 当时的字体族列表**快照**下来。之后再注册的文件，
+即使 family 名在匹配期能解析，也永远不会被 pango 看到——而 `Card` 成员 `text_` 的 `TextRenderer`
+构造函数里就会建好一个 `PangoLayout`。所以 `applyFontConfig()` 必须留在 `main()` 里、
+`App`（它构造 `Card`）之前。
+
+验证方式（把系统字体目录摘掉，只留注册进来的那个文件）：
+
+```bash
+mkdir -p /tmp/fc/fonts /tmp/fc/dl /tmp/fc/cache
+printf '<fontconfig><dir>/tmp/fc/fonts</dir><cachedir>/tmp/fc/cache</cachedir></fontconfig>' \
+    > /tmp/fc/fonts.conf
+cp 某个字体.ttf /tmp/fc/dl/
+
+# 1) 空字体目录：族名解析不到，两条警告，渲染回退
+FONTCONFIG_FILE=/tmp/fc/fonts.conf ./pw-mpris-visualcard-native --demo --progress 0 \
+    --font "某个字体族名" --dump /tmp/a.png
+
+# 2) 只注册文件：不再报警
+FONTCONFIG_FILE=/tmp/fc/fonts.conf ./pw-mpris-visualcard-native --demo --progress 0 \
+    --font-file /tmp/fc/dl/某个字体.ttf --dump /tmp/b.png
+
+# 3) baseline：把同一个文件放进配置的字体目录，当作「已安装」。fc-cache 不能省，
+#    目录缓存的秒级时间戳会漏掉同一秒内的复制
+cp 某个字体.ttf /tmp/fc/fonts/
+FONTCONFIG_FILE=/tmp/fc/fonts.conf fc-cache -f
+FONTCONFIG_FILE=/tmp/fc/fonts.conf ./pw-mpris-visualcard-native --demo --progress 0 \
+    --font "某个字体族名" --dump /tmp/base.png
+
+cmp /tmp/b.png /tmp/base.png   # 必须逐像素一致
+```
+
+`--progress 0` 是为了去掉时钟：进度环跟着墙上时间走，不关掉整图永远对不齐。`--demo` 的曲目每
+10s 一换，所以两次运行还得落在同一个 10s 窗口内。不要拿系统环境的渲染当 baseline——裸
+`FONTCONFIG_FILE` 会连 conf.d 的 hinting/antialias 规则一起丢掉，字体选对了像素也会差；baseline
+只能取自同一份配置。另外，只给 `--font-file`（族名自动取）与再手写 `--font "族名" --font-file
+x.ttf` 必须逐像素一致。
+
 ## 调试方法
 
 节点层「在不在、属性对不对、帧有没有真的流」的排查手段归库，见

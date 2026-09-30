@@ -302,6 +302,9 @@ void Card::drawLine(cairo_t* cr, const std::string& s, double size, double alpha
   spec.bold = bold;
   spec.widthPx = width;
   spec.maxLines = maxLines;
+  // Empty means the caller never set a font: keep the pango default (sans-serif). A comma-separated
+  // chain is handed over as-is; pango resolves it, each name through fontconfig.
+  if (!cfg_.font.empty()) spec.family = cfg_.font;
 
   PangoLayout* l = text_.layout(cr, s, spec);
   const pwvideo::LabelMetrics m = pwvideo::TextRenderer::measure(l);

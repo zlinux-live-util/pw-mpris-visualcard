@@ -2,7 +2,7 @@
 # All dependencies are distribution system libraries; no third-party package manager involved.
 
 CXX      ?= g++
-PKGS     := cairo pangocairo libpipewire-0.3 sdbus-c++ libcurl gdk-pixbuf-2.0 glib-2.0
+PKGS     := cairo pangocairo fontconfig libpipewire-0.3 sdbus-c++ libcurl gdk-pixbuf-2.0 glib-2.0
 # -O3 -march=native pays off clearly on the rotation hot loop (measured -22% per frame).
 # The cost is a binary bound to the local instruction set; to run elsewhere or distribute it,
 # use make PORTABLE=1.

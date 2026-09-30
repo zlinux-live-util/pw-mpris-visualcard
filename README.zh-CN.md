@@ -122,6 +122,8 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 | `--size WxH` | `360x360` | 输出尺寸；只写一个数字表示正方形。**版式全部按高度等比缩放，宽度只决定左右留白**——圆形封面受纵向预算约束，方画布横向必然富余较多 |
 | `--fps N` | `30` | **帧率上限**。向 PipeWire 声明的是 `[N/4, N]` 区间，消费者可协商到更低但不会超过 N；实际推帧按协商结果执行，下限 5fps |
 | `--bg MODE` | `none` | `none` 完全透明；`solid` 不透明深色底；也可给 `#rrggbb` |
+| `--font NAME[,NAME...]` | `sans-serif` | 卡片所有文字的字体 family。逗号分隔即回退链，由 pango **逐字符**回退，所以可以把拉丁字体和中文字体配成一条链 |
+| `--font-file PATH` | | 启动时把字体文件（或整个目录）注册进 fontconfig，从而免安装、免 root 就能用下载来的 `.ttf`/`.otf`/`.ttc`。可重复传入；`~/` 会展开 |
 | `--progress 0\|1` | `1` | 进度环 |
 | `--time 0\|1` | `0` | 显示 `1:23 / 3:12` |
 | `--album 0\|1` | `0` | 歌手后追加专辑名 |
@@ -134,6 +136,36 @@ systemctl --user restart pw-mpris-visualcard    # 改过参数后重启才生效
 | `--dump FILE` | | 采样一次渲染为 PNG 后退出 |
 | `--demo` | | 使用假数据，不连接 D-Bus |
 | `--help`, `-h` | | 打印参数简表 |
+
+### 自定义字体
+
+只要 fontconfig 认得就能用，无需配置字体列表。
+
+```bash
+# 按字体名
+--font "Inter"
+
+# 回退链：拉丁用 Inter，其余交给 Noto
+--font "Inter,Noto Sans CJK SC"
+
+# 未安装到系统里的字体——不需要 root，也不用往 /usr/share/fonts 里拷
+--font-file ~/Downloads/MyFont.ttf
+```
+
+`--font-file` 只在本进程内注册，**不需要再指定字体名**：family 名是从字体文件自身读出来的，所以单写 `--font-file` 就够了。以下情况再搭配 `--font`：不想手打字体自报的名字、`.ttc` 想用非首个字体面、或者想按顺序试多个已注册文件。传目录则注册该目录下全部字体。
+
+```bash
+# 整包字体，先匹配到的生效
+--font-file ~/Downloads/fonts --font-file ~/Downloads/Display.ttf
+```
+
+这里的一切都刻意**不致命**：文件缺失或字体名不认识时只告警，卡片退回默认字体渲染——字形不对也比起不来强。实际生效的字体会在启动时打印：
+
+```
+  Font: Inter,Noto Sans CJK SC
+```
+
+两点值得知道。所选字体没覆盖的字符仍能显示——pango 会逐字符回退，所以纯拉丁字体下中文歌词照样出得来。标题按 semibold 字重绘制，若字体没有 semibold 字面就退回常规字重，而不是合成一个假粗体。
 
 ### 调版面无需打开 OBS
 

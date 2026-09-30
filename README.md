@@ -122,6 +122,8 @@ systemctl --user restart pw-mpris-visualcard    # after changing the arguments
 | `--size WxH` | `360x360` | Output size; a single number means a square. **The entire layout scales with height, width only sets the side margins** — the circular cover is constrained by the vertical budget, so a square canvas always leaves a wide margin |
 | `--fps N` | `30` | **Frame-rate ceiling.** The range advertised to PipeWire is `[N/4, N]`; consumers may negotiate lower but never higher. Frames are pushed at the negotiated rate, floored at 5fps |
 | `--bg MODE` | `none` | `none` is fully transparent, `solid` is an opaque dark background, `#rrggbb` sets a specific colour |
+| `--font NAME[,NAME...]` | `sans-serif` | Font family for all card text. A comma-separated list is a fallback chain, resolved per character by pango, so a Latin family can be paired with a CJK one |
+| `--font-file PATH` | | Register a font file — or a whole directory of them — with fontconfig at startup, so a downloaded `.ttf`/`.otf`/`.ttc` can be used without installing it system-wide. Repeatable; `~/` is expanded |
 | `--progress 0\|1` | `1` | Progress ring |
 | `--time 0\|1` | `0` | Show `1:23 / 3:12` |
 | `--album 0\|1` | `0` | Append the album name after the artist |
@@ -134,6 +136,36 @@ systemctl --user restart pw-mpris-visualcard    # after changing the arguments
 | `--dump FILE` | | Render one sample to a PNG and exit |
 | `--demo` | | Use fake data; do not connect to D-Bus |
 | `--help`, `-h` | | Print a short option summary |
+
+### Custom fonts
+
+Any font fontconfig knows about works; there is no font list to configure.
+
+```bash
+# by family name
+--font "Inter"
+
+# a fallback chain: Inter for Latin, Noto for everything else it does not cover
+--font "Inter,Noto Sans CJK SC"
+
+# a font that is not installed system-wide -- no root, no copying into /usr/share/fonts
+--font-file ~/Downloads/MyFont.ttf
+```
+
+`--font-file` registers the file with fontconfig for this process only, and nothing else is needed: the family name is read out of the font itself, so `--font-file` on its own is enough. Combine it with `--font` when the file declares a name you would rather not type, when a `.ttc` should use a face other than the first, or when several registered files should be tried in order. A directory registers everything inside it.
+
+```bash
+# a whole font pack, first family wins
+--font-file ~/Downloads/fonts --font-file ~/Downloads/Display.ttf
+```
+
+Nothing here is fatal by design. A missing file or an unknown family prints a warning and the card renders in the default font, because a card in the wrong typeface is better than a card that refuses to start. The font actually in use is printed at startup:
+
+```
+  Font: Inter,Noto Sans CJK SC
+```
+
+Two details worth knowing. Characters the chosen family does not cover still resolve — pango falls back per character, so CJK lyrics show up even under a Latin-only family. And the title is drawn at semibold weight; a family with no semibold face gets the regular one, not a synthesised fake bold.
 
 ### Tuning the layout without opening OBS
 
