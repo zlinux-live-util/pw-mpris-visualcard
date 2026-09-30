@@ -1,5 +1,7 @@
 #pragma once
-// Optional display-side post-processing for the spectrum ring.
+// Optional display-side post-processing for the spectrum ring. On by default (--viz-fx 0 turns it
+// off): the motion model is the part that makes the bars look like they have weight rather than
+// jumping with every frame.
 //
 // The motion model is cava's, not an attack/release envelope. Cava (github.com/karlstav/cava,
 // cavacore.c) ignores the measurement while a bar is falling and recomputes it from the peak of
@@ -11,8 +13,8 @@
 // Deliberately absent: noise reduction and noise gates. Cava has a knob called `noise_reduction`
 // and it is *not* that -- it is smoothing strength, and it is used here under an honest name.
 //
-// None of it runs unless --viz-fx is given: with it off, apply() returns on its first branch and
-// the ring shows exactly what the analyser measured.
+// None of it runs when --viz-fx is off: apply() then returns on its first branch and the ring shows
+// exactly what the analyser measured.
 #include <cstddef>
 #include <vector>
 
@@ -20,7 +22,7 @@ namespace oms {
 
 struct SpectrumFxOptions {
   /** Master switch, --viz-fx. */
-  bool enabled = false;
+  bool enabled = true;
 
   /** dB added to every band before anything else. */
   double gainDb = 0.0;

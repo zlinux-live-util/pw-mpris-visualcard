@@ -53,9 +53,10 @@ struct Config {
   int vizBars = 72;            // bars in the ring (--viz-bars)
   std::string vizSource;       // audio target override (--viz-source); empty = the MPRIS player
   // Display-side post-processing for the ring (--viz-fx), in the spirit of cava's [cava] section.
-  // All of it is skipped unless vizFx is set, so the ring keeps showing the analyser's own levels.
+  // On by default: the chain is what makes the bars read as having weight instead of flickering
+  // with every frame. --viz-fx 0 skips all of it and the ring shows the analyser's own levels.
   // This changes how levels are drawn, never the audio: see fx.hpp.
-  bool vizFx = false;
+  bool vizFx = true;
   double vizGainDb = 0.0;      // --viz-gain, dB of expansion applied before everything else
   double vizGravity = 0.77;    // --viz-gravity: cava's noise_reduction, how heavy the bars are
   double vizShape = 0.5;       // --viz-shape, 0..1: blend towards a blur along the band axis

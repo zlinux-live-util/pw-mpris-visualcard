@@ -61,6 +61,12 @@ class Card {
 
   bool transparent() const { return !hasBg_; }
 
+  /** Radius the spectrum ring adds around the cover, i.e. its clearance plus its band. Zero when
+   *  the ring is off. The ring surrounds the cover, so the layout has to reserve this on all four
+   *  sides: twice in the width budget (a margin inside each edge of --size), once in the vertical
+   *  budget for the top, and once in the cover-to-text gap at the bottom. */
+  double vizRingR() const { return cfg_.showViz ? m_.vizGap + m_.vizBand : 0.0; }
+
   /** Static layer: card background / cover drop shadow / cover circular-backdrop gradient /
    *  progress-ring track / the spectrum ring's groove / all text. Text and cover do not overlap,
    *  so merging them into the same layer is entirely safe: one blit per frame. Reused as-is while

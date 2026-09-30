@@ -132,7 +132,7 @@ systemctl --user restart pw-mpris-visualcard    # after changing the arguments
 | `--viz 0\|1` | `0` | Radial spectrum ring around the cover. **Off by default, and with it off the layout is byte-for-byte what it always was** |
 | `--viz-bars N` | `72` | Bars in the ring, `8`..`256` |
 | `--viz-source NAME` | | Capture this PipeWire audio node / app instead of the one MPRIS names. Use it when the automatic match fails; the node name works |
-| `--viz-fx 0\|1` | `0` | Ring post-processing: ballistics, band-axis shaping, sliding-window auto-gain. **Off by default — with it off the ring shows the measured spectrum unchanged** |
+| `--viz-fx 0\|1` | `1` | Ring post-processing: ballistics, band-axis shaping, sliding-window auto-gain. **On by default — this chain is what makes the bars read as having weight. `--viz-fx 0` turns all of it off and the ring shows the measured spectrum unchanged** |
 | `--viz-gain DB` | `0` | Expansion in dB, applied before everything else |
 | `--viz-gravity N` | `77` | How heavy the bars are, `0`..`100`; at `10` or below the motion model is off (cava's own threshold). This is cava's `noise_reduction`, which is smoothing strength and **not** noise removal |
 | `--viz-shape N` | `50` | `0`..`100`, blend towards a 1-2-1 blur along the band axis. At `100` one lone tall band becomes a three-band mound |
@@ -151,7 +151,7 @@ systemctl --user restart pw-mpris-visualcard    # after changing the arguments
 
 ![Card with the spectrum ring](docs/card-viz-460x690.png)
 
-`--size 460x690 --viz 1 --lyrics 4 --time 1 --album 1`, captured from real playback. The ring is that player's own audio: longer bars at the bottom are the bass, the short ones at the top are the near-empty air band.
+`--size 460x690 --viz 1 --lyrics 4 --time 1 --album 1`, captured from real playback with the default `--viz-fx` chain. The ring is that player's own audio, running clockwise from the lowest band at 3 o'clock: the long bars on the right and around the bottom are the bass, the stubs up top are the near-empty air band.
 
 ```bash
 ./pw-mpris-visualcard-native --viz 1                          # follow the MPRIS player
@@ -166,20 +166,21 @@ How it gets its input:
 3. An input stream is pointed at that node's `object.serial`, which makes PipeWire hand over the node's **monitor** ports — the signal that player submitted, before any device mixer, volume or effect.
 4. A 2048-point Hann-windowed FFT folds that into logarithmically spaced bands, and the bars grow outward.
 
-Nothing is done to the audio on the way: no gain, no noise gate, no AGC, no smoothing. The captured stream is already the player's own signal, and any level processing on top would draw a spectrum the music does not have. Bar height comes from a fixed dBFS window, so it stays proportional to what is actually playing and comparable between tracks. (All of that is display-side and only exists behind `--viz-fx`, off by default.)
+Nothing is done to the audio on the way: no gain, no noise gate, no AGC, no smoothing. The captured stream is already the player's own signal, and any level processing on top would draw a spectrum the music does not have. Bar height comes from a fixed dBFS window, so it stays proportional to what is actually playing and comparable between tracks. (All of that is display-side and lives behind `--viz-fx`, on by default; `--viz-fx 0` turns it off.)
 
-Layout notes: the ring needs clearance all the way round, and the bottom of the ring is exactly where the text starts, so enabling it widens the gap above the text rather than letting the bars grow over the first line. The ring turns the opposite way from the cover and a quarter as fast, so the two read as separate motions.
+Layout notes: the ring needs clearance all the way round, and the bottom of the ring is exactly where the text starts, so enabling it takes the room off the cover and out of the gap above the text rather than letting the bars grow over the first line or run off an edge. The ring turns the opposite way from the cover and a quarter as fast, so the two read as separate motions.
 
 If no node matches, the ring stays empty with its base circle showing and one line is printed naming the problem — nothing is silently blank. `--demo --viz 1` renders a stand-in spectrum, so the layout can be tuned with no player at all.
 
 ### Ring post-processing
 
-`--viz-fx 1` turns on a chain whose bar motion is taken from [cava](https://github.com/karlstav/cava)'s `cavacore.c`, constants included. It is off by default, and with it off the bars are exactly what the analyser measured.
+`--viz-fx 1` (the default) turns on a chain whose bar motion is taken from [cava](https://github.com/karlstav/cava)'s `cavacore.c`, constants included. It is on by default, because the chain is what gives the bars their weight; `--viz-fx 0` takes all of it away and the bars are then exactly what the analyser measured.
 
 ```bash
-./pw-mpris-visualcard-native --viz 1 --viz-fx 1                 # cava motion, default weight
-./pw-mpris-visualcard-native --viz 1 --viz-fx 1 --viz-gravity 95   # heavier, slower fall
-./pw-mpris-visualcard-native --viz 1 --viz-fx 1 --viz-shape 100     # maximum mound shaping
+./pw-mpris-visualcard-native --viz 1                          # ring with the default post-processing
+./pw-mpris-visualcard-native --viz 1 --viz-fx 0                # bars exactly as measured
+./pw-mpris-visualcard-native --viz 1 --viz-gravity 95          # heavier, slower fall
+./pw-mpris-visualcard-native --viz 1 --viz-shape 100           # maximum mound shaping
 ```
 
 | Stage | Flag | What it does |
@@ -216,7 +217,7 @@ make dump                                                    # one PNG from fake
 | Private (anonymous) memory | **6–25 MB** (grows with the cover cache and the cairo/pango glyph caches) |
 | CPU | **≈5.5% of one core** (`460x690` at 30fps, of which cover rotation accounts for 3.5 points) |
 | `--viz 1` adds | **≈0.33%** of one core (measured: +0.10 ms/frame drawing, +0.018 ms/frame FFT) |
-| `--viz-fx 1` adds | **≈0.001%** of one core — the chain itself is free (0.0005 ms/frame measured); ring drawing scales with how much of the band is filled |
+| `--viz-fx` (default on) adds | **≈0.001%** of one core — the chain itself is free (0.0005 ms/frame measured); ring drawing scales with how much of the band is filled |
 | With no consumer attached | zero frames pushed, **≈0.25%** CPU |
 | Child processes | **0** (persistent D-Bus connection) |
 
@@ -257,7 +258,7 @@ When scaling up, multiply **both dimensions** and keep `W:H = 2:3`; the side mar
 | `src/mpris.{hpp,cpp}` | sdbus-c++ persistent connection + sampling thread + LRC parsing |
 | `src/audio.{hpp,cpp}` | PipeWire capture: registry, player-name matching, raw mono sample ring (`--viz`) |
 | `src/analyser.{hpp,cpp}` | FFT, window, band folding, fixed dB window (`--viz`) |
-| `src/fx.{hpp,cpp}` | Optional ring post-processing: expansion, cava-style bar motion, band shaping, sliding-window auto-gain (`--viz-fx`) |
+| `src/fx.{hpp,cpp}` | Ring post-processing: expansion, cava-style bar motion, band shaping, sliding-window auto-gain (`--viz-fx`, on by default) |
 | `src/card.{hpp,cpp}` | Layout rendering with cairo + pango |
 | `lib/pw-video-simple-interface/` | Git submodule: the video node (registration, buffers, frame-rate negotiation) plus the cairo helpers (frame, text, asset cache, HTTP) |
 | `src/main.cpp` | Module wiring and command-line parsing |

@@ -57,7 +57,7 @@ void usage() {
       "  --viz-bars N    Bars in the ring, 8..256, default 72\n"
       "  --viz-source S  Capture this PipeWire audio node / app instead of the MPRIS player\n"
       "  --viz-fx 0|1    Ring post-processing: cava-style bar motion, band shaping, auto-gain.\n"
-      "                  default 0 (off) -- the ring then shows the measured spectrum unchanged\n"
+      "                  default 1 (on) -- 0 shows the measured spectrum unchanged\n"
       "  --viz-gain DB   Expansion in dB before everything else, default 0\n"
       "  --viz-gravity N 0..100, how heavy the bars are: slower fall, more momentum.\n"
       "                  Cava's noise_reduction; 10 or below turns it off. Default 77\n"

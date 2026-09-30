@@ -201,8 +201,7 @@ Card::Card(Config cfg)
     m_.vizGap = (cfg_.showProgress ? m_.ringGap + m_.ringW : 0.0) + kVizClearPx * k;
     // The ring needs clearance all the way round, and the bottom of the ring is exactly where the
     // text starts. Rather than letting the bars grow over the first line, the cover-to-text gap is
-    // widened until they clear it. The block as a whole stays centred, so the text block and its
-    // leading edge do not move relative to the card; only the cover above it gives up the room.
+    // widened until they clear it. The ring's radius is charged to the other three sides below.
     m_.gap = std::max(m_.gap, m_.vizGap + m_.vizBand + kVizMoatPx * k);
   }
 
@@ -224,10 +223,22 @@ Card::Card(Config cfg)
   if (cfg_.showTime) restH += m_.gap + 1.35 * m_.timeSize;
   double byWidth = 0.92 * W;
   double byHeight = 0.96 * H - restH;
-  if (cfg_.showViz) byWidth -= 2.0 * (m_.vizGap + m_.vizBand);
-  // The lower bound is a fraction of the height, which a narrow canvas can push past what the
-  // width allows; taking the min keeps clamp's precondition rather than relying on it holding.
-  m_.coverD = std::clamp(std::min(byWidth, byHeight), std::min(0.20 * H, byWidth), byWidth);
+  if (cfg_.showViz) {
+    // The ring sits outside the cover all the way round, so the vertical budget has to reserve it
+    // too, not just the width: the width budget gives it a margin on both sides and the widened gap
+    // above already covers it at the bottom. The top was the one side left unpaid, and without this
+    // the ring's outer edge is drawn off the top of the canvas.
+    byWidth -= 2.0 * vizRingR();
+    byHeight -= vizRingR();
+  }
+  // The floor is the fraction of the height the cover would like to keep, which a narrow canvas can
+  // legitimately push past; the min with byWidth keeps clamp's precondition rather than relying on
+  // it holding. With the ring on it is additionally capped at the vertical remainder, so the floor
+  // cannot hand back the room the ring needs at the top and push its outer edge off the canvas.
+  // The 1px outside all of it keeps the radius positive where the remainder is negative outright.
+  double lo = std::min(0.20 * H, byWidth);
+  if (cfg_.showViz) lo = std::min(lo, byHeight);
+  m_.coverD = std::max(1.0, std::clamp(std::min(byWidth, byHeight), lo, byWidth));
 }
 
 Card::~Card() = default;
@@ -590,12 +601,16 @@ void Card::render(cairo_t* cr, const NowPlaying& np, cairo_surface_t* cover,
 
   double metaH = titleBox + m_.metaGap + subBox;
   if (nLy > 0) metaH += m_.metaGap + lyricBox;
-  const double total = m_.coverD + m_.gap + metaH + (showTimes ? m_.gap + timeBox : 0.0);
+  // The ring adds a band of radius around the cover, so it enters the centred block as height above
+  // it; at the bottom the widened cover-to-text gap already reserves the same band.
+  const double ringAllow = vizRingR();
+  const double total =
+      ringAllow + m_.coverD + m_.gap + metaH + (showTimes ? m_.gap + timeBox : 0.0);
 
   double y = (H - total) / 2.0;
   const double cx = W / 2.0;
-  const double cy = y + coverR;
-  const double yMeta = y + m_.coverD + m_.gap;
+  const double cy = y + ringAllow + coverR;
+  const double yMeta = y + ringAllow + m_.coverD + m_.gap;
   const double textW = W - 2 * m_.pad;
 
   int64_t pos = np.position;
