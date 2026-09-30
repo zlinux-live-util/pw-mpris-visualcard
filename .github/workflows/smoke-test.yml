@@ -1,0 +1,61 @@
+name: Smoke Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libpipewire-0.3-dev \
+            libsdbus-c++-dev \
+            libcurl4-openssl-dev \
+            libgdk-pixbuf-2.0-dev \
+            libglib2.0-dev
+
+      - name: Build (PORTABLE=1)
+        run: |
+          make clean
+          make PORTABLE=1 -j$(nproc)
+
+      - name: Smoke Test (Demo PNG Dump)
+        run: |
+          ./pw-mpris-visualcard-native --demo --lyrics 4 --time 1 --album 1 --dump /tmp/smoke_test.png
+          if [[ ! -s /tmp/smoke_test.png ]]; then
+            echo "Smoke test failed: /tmp/smoke_test.png is empty or missing" >&2
+            exit 1
+          fi
+          echo "Smoke test passed successfully! Generated $(wc -c < /tmp/smoke_test.png) bytes PNG."

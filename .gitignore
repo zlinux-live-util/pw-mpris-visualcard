@@ -5,3 +5,7 @@
 
 # Build artifacts from the submodule sources
 /build
+
+# Temporary directories
+/temp/
+/tmp/

@@ -61,6 +61,12 @@ Everything comes from the distribution repositories; no language package manager
 ```bash
 # Arch
 sudo pacman -S --needed base-devel cairo pango gdk-pixbuf2 libpipewire sdbus-cpp curl
+
+# Fedora
+sudo dnf install gcc-c++ cairo-devel pango-devel pipewire-devel sdbus-cpp-devel libcurl-devel gdk-pixbuf2-devel glib2-devel
+
+# Ubuntu / Debian (24.04+)
+sudo apt install build-essential libcairo2-dev libpango1.0-dev libpipewire-0.3-dev libsdbus-c++-dev libcurl4-openssl-dev libgdk-pixbuf-2.0-dev libglib2.0-dev
 ```
 
 OBS ships `linux-pipewire`, which goes through xdg-desktop-portal and can only capture screens and windows; it cannot select this node. Use the [**obs-pwvideo**](https://github.com/tasokait/obs-pwvideo) plugin instead.

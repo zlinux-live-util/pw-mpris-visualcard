@@ -1,0 +1,233 @@
+name: Artifact & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish GitHub Release (true) or only upload artifacts (false)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-trigger:
+    name: Check Trigger & Version
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.eval.outputs.should_build }}
+      should_publish: ${{ steps.eval.outputs.should_publish }}
+      version: ${{ steps.eval.outputs.version }}
+      deb_version: ${{ steps.eval.outputs.deb_version }}
+      tag_name: ${{ steps.eval.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate Triggers
+        id: eval
+        shell: bash
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          MANUAL_PUBLISH: ${{ inputs.publish || false }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TAG_NAME=""
+          VERSION=""
+          DEB_VERSION=""
+
+          if [[ "$REF_TYPE" == "tag" && "$REF_NAME" =~ ^v[0-9] ]]; then
+            TAG_NAME="$REF_NAME"
+            VERSION="${REF_NAME#v}"
+            DEB_VERSION="$VERSION"
+          else
+            VERSION="0.1.0+git.${SHORT_SHA}"
+            DEB_VERSION="0.1.0~git${SHORT_SHA}"
+            TAG_NAME="v0.1.0-${SHORT_SHA}"
+          fi
+
+          SHOULD_BUILD="false"
+          SHOULD_PUBLISH="false"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            SHOULD_BUILD="true"
+            SHOULD_PUBLISH="$MANUAL_PUBLISH"
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            SHOULD_BUILD="true"
+            SHOULD_PUBLISH="true"
+          elif [[ "$COMMIT_MSG" =~ \[(build-)?release\] ]]; then
+            SHOULD_BUILD="true"
+            if [[ "$EVENT_NAME" == "push" && ("$REF_NAME" == "main" || "$REF_NAME" == "master") ]]; then
+              SHOULD_PUBLISH="true"
+            fi
+          elif [[ "$COMMIT_MSG" =~ \[(build-)?artifact\] ]]; then
+            SHOULD_BUILD="true"
+            SHOULD_PUBLISH="false"
+          fi
+
+          echo "should_build=${SHOULD_BUILD}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${SHOULD_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "deb_version=${DEB_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "Trigger evaluation:"
+          echo "  should_build: $SHOULD_BUILD"
+          echo "  should_publish: $SHOULD_PUBLISH"
+          echo "  version: $VERSION"
+          echo "  tag_name: $TAG_NAME"
+
+  build-and-package:
+    name: Package (${{ matrix.arch }})
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            deb_arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            deb_arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libpipewire-0.3-dev \
+            libsdbus-c++-dev \
+            libcurl4-openssl-dev \
+            libgdk-pixbuf-2.0-dev \
+            libglib2.0-dev
+
+      - name: Build (PORTABLE=1)
+        run: |
+          make clean
+          make PORTABLE=1 -j$(nproc)
+
+      - name: Smoke Test (Demo PNG Dump)
+        run: |
+          ./pw-mpris-visualcard-native --demo --lyrics 4 --time 1 --album 1 --dump /tmp/smoke_test.png
+          if [[ ! -s /tmp/smoke_test.png ]]; then
+            echo "Smoke test failed: /tmp/smoke_test.png is empty or missing" >&2
+            exit 1
+          fi
+          echo "Smoke test passed successfully! Generated $(wc -c < /tmp/smoke_test.png) bytes PNG."
+
+      - name: Package artifacts
+        env:
+          VERSION: ${{ needs.check-trigger.outputs.version }}
+          DEB_VERSION: ${{ needs.check-trigger.outputs.deb_version }}
+          ARCH: ${{ matrix.arch }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/packages
+
+          # 1. Portable Tarball
+          TAR_DIR="pw-mpris-visualcard-${VERSION}-linux-${ARCH}"
+          mkdir -p "dist/${TAR_DIR}"
+          cp pw-mpris-visualcard-native "dist/${TAR_DIR}/pw-mpris-visualcard"
+          cp pw-mpris-visualcard.service "dist/${TAR_DIR}/"
+          cp README.md README.zh-CN.md LICENSE "dist/${TAR_DIR}/"
+          cp scripts/install.sh scripts/uninstall.sh "dist/${TAR_DIR}/"
+          tar -czvf "dist/packages/${TAR_DIR}.tar.gz" -C dist "${TAR_DIR}"
+
+          # 2. Debian / Ubuntu (.deb) package
+          DEB_PKG="pw-mpris-visualcard_${DEB_VERSION}_${DEB_ARCH}"
+          mkdir -p "dist/${DEB_PKG}/DEBIAN"
+          mkdir -p "dist/${DEB_PKG}/usr/bin"
+          mkdir -p "dist/${DEB_PKG}/usr/lib/systemd/user"
+          mkdir -p "dist/${DEB_PKG}/usr/share/doc/pw-mpris-visualcard"
+
+          cp pw-mpris-visualcard-native "dist/${DEB_PKG}/usr/bin/pw-mpris-visualcard-native"
+          ln -sf pw-mpris-visualcard-native "dist/${DEB_PKG}/usr/bin/pw-mpris-visualcard"
+
+          sed -e "s|@REPO@/pw-mpris-visualcard-native|/usr/bin/pw-mpris-visualcard-native|g" \
+              -e "s|@ARGS@|--node pw-mpris-visualcard --size 460x690 --fps 30 --lyrics 3|g" \
+              pw-mpris-visualcard.service > "dist/${DEB_PKG}/usr/lib/systemd/user/pw-mpris-visualcard.service"
+
+          cp README.md README.zh-CN.md LICENSE "dist/${DEB_PKG}/usr/share/doc/pw-mpris-visualcard/"
+
+          cat <<EOF > "dist/${DEB_PKG}/DEBIAN/control"
+          Package: pw-mpris-visualcard
+          Version: ${DEB_VERSION}
+          Section: video
+          Priority: optional
+          Architecture: ${DEB_ARCH}
+          Maintainer: zlinux-live-util
+          Depends: libcairo2, libpango-1.0-0, libpipewire-0.3-0, libsdbus-c++, libcurl4 | libcurl4-openssl-dev, libgdk-pixbuf-2.0-0, libglib2.0-0
+          Suggests: obs-studio
+          Description: Render currently playing MPRIS track as a PipeWire video node for OBS
+           Single-process native C++ renderer that captures now-playing track
+           information via D-Bus MPRIS and outputs a transparent overlay card
+           directly as a PipeWire video stream for OBS Studio.
+          EOF
+          sed -i 's/^[ ]\{10\}//' "dist/${DEB_PKG}/DEBIAN/control"
+
+          dpkg-deb --build "dist/${DEB_PKG}" "dist/packages/${DEB_PKG}.deb"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [check-trigger, build-and-package]
+    if: needs.check-trigger.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-trigger.outputs.tag_name }}
+          name: Release ${{ needs.check-trigger.outputs.version }}
+          draft: false
+          prerelease: false
+          files: release-assets/*
+          generate_release_notes: true
