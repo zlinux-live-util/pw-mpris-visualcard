@@ -2,6 +2,8 @@
 
 修改代码前先读本文。以下每条都来自实机验证，而非文档转述：其中若干条官方文档没有记载，或文档描述与本插件的实际行为不符。
 
+面向用户的说明另见 [spectrum-ring.md](spectrum-ring.md)（频谱环用法）、[fonts.md](fonts.md)（字体）、[performance.md](performance.md)（实测数据）；架构、构建与贡献约定见 [development.md](development.md)。
+
 本文与项目代码均在 LLM 辅助下编写。所有结论都经过实机复现——未经复现的推测不收录，因此每项都附有可重跑的对照数据或命令。
 
 ## 进程与线程
